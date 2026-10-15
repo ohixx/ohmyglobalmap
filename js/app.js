@@ -24,7 +24,7 @@
       hover: { fillColor: '#3b3a36', color: '#5a5952', weight: 1 }, region: { fill: 0.74, line: 0.55 } },
     relief: { label: 'Рельеф', theme: 'dark',
       layers: [
-        { url: 'https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png', opt: { subdomains: 'abcd', maxNativeZoom: 19 }, attr: '© OpenStreetMap, © CARTO' },
+        { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', opt: { maxNativeZoom: 16 }, attr: 'Основа: Esri' },
         { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}', opt: { maxNativeZoom: 15, className: 'hillshade', opacity: 0.8 }, attr: 'Рельеф: Esri' },
       ],
       neutral: { color: '#d8d4c6', weight: 0.7, opacity: 0.42, fillColor: '#fff', fillOpacity: 0.001 },
@@ -35,7 +35,7 @@
       hover: { fillColor: '#fff', fillOpacity: 0.2, weight: 1.2, opacity: 0.8 }, region: { fill: 0.55, line: 0.85 } },
   };
 
-  const DEFAULT_PREFS = { style: 'dark', era: 'now', rough: 40, fill: 'color', cities: { show: true, labels: true, caps: false, density: 40, size: 100 } };
+  const DEFAULT_PREFS = { style: 'dark', era: 'now', rough: 40, tool: 'line', fill: 'color', fold: { panel: false, timeline: false }, cities: { show: true, labels: true, caps: false, density: 40, size: 100 } };
   let P = JSON.parse(JSON.stringify(DEFAULT_PREFS));
 
   // ---------- helpers ----------
@@ -159,6 +159,24 @@
     }
     return out;
   }
+
+  const roughenOpen = (pts, amp) => {
+    if (amp <= 0 || pts.length < 2) return pts;
+    const out = [];
+    for (let i = 0; i < pts.length - 1; i++) { out.push(pts[i]); wobble(pts[i], pts[i + 1], amp, 3, out); }
+    out.push(pts[pts.length - 1]);
+    return out;
+  };
+  const smoothOpen = (pts) => {
+    if (pts.length < 3) return pts;
+    const out = [pts[0]];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i], b = pts[i + 1];
+      out.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]);
+    }
+    out.push(pts[pts.length - 1]);
+    return out;
+  };
 
   // ---------- данные ----------
   const eraData = {};            // id -> {list:[{key,name,sub,flag,geometry,named,mp,bb}], byKey:Map}
@@ -489,6 +507,18 @@
   $('#citiesBtn').addEventListener('click', (e) => { e.stopPropagation(); cityPop.hidden = !cityPop.hidden; });
   document.addEventListener('click', (e) => { if (!cityPop.hidden && !cityPop.contains(e.target) && !e.target.closest('#citiesBtn')) cityPop.hidden = true; });
 
+  // панели сворачиваются вниз
+  function setFold(which, on, quiet) {
+    P.fold[which] = on;
+    const el = which === 'panel' ? $('#panel') : $('#timeline');
+    el.classList.toggle('collapsed', on);
+    document.body.classList.toggle(which === 'panel' ? 'panel-collapsed' : 'tl-collapsed', on);
+    if (!quiet) savePrefs();
+  }
+  $('#panelFold').addEventListener('click', (e) => { e.stopPropagation(); setFold('panel', !P.fold.panel); });
+  document.querySelector('#panel .brand').addEventListener('click', (e) => { if (P.fold.panel && !e.target.closest('button')) setFold('panel', false); });
+  $('#tlFold').addEventListener('click', () => setFold('timeline', !P.fold.timeline));
+
   // режим без интерфейса
   function setClean(on) {
     document.body.classList.toggle('clean', on);
@@ -599,8 +629,12 @@
       const others = eraRegions().filter((x) => x.region.id !== m.source);
       if (!src || !others.length) { endMode(); return; }
       if (!others.some((x) => x.region.id === m.target)) m.target = others[0].region.id;
-      text = ['Обведи от руки участок «', h('b', {}, src.region.name), '» — он перейдёт к:'];
-      const sel = h('select', { onchange: () => { m.target = sel.value; } });
+      text = P.tool === 'line'
+        ? ['Проведи линию через «', h('b', {}, src.region.name), '» от границы до границы, затем кликни по части, которая перейдёт к:']
+        : ['Обведи от руки участок «', h('b', {}, src.region.name), '» — он перейдёт к:'];
+      tools.push(h('div', { class: 'seg' }, [['line', 'Линия'], ['loop', 'Обвести']].map(([id, label]) =>
+        h('button', { class: P.tool === id ? 'on' : '', title: id === 'line' ? 'Разрезать страну линией и выбрать часть' : 'Обвести участок контуром', onclick: () => { P.tool = id; clearPending(); savePrefs(); renderBanner(); } }, label))));
+      const sel = h('select', { onchange: () => { m.target = sel.value; refreshPending(); } });
       for (const s of state.sides) {
         const opts = others.filter((x) => x.side === s);
         if (opts.length) sel.append(h('optgroup', { label: s.name }, opts.map((x) => h('option', { value: x.region.id, selected: x.region.id === m.target }, x.region.name))));
@@ -629,8 +663,9 @@
     const c = map.getContainer();
     let pts = null, line = null, closer = null;
     const down = (e) => {
-      if ((e.pointerType === 'mouse' && e.button !== 0) || e.target.closest('.leaflet-control, .leaflet-popup')) return;
+      if ((e.pointerType === 'mouse' && e.button !== 0) || e.target.closest('.leaflet-control, .leaflet-popup, .pick-piece')) return;
       try { c.setPointerCapture(e.pointerId); } catch (err) { /* не критично */ }
+      clearPending();
       pts = [map.mouseEventToLatLng(e)];
       line = L.polyline(pts, { pane: 'draw', color: '#fff', weight: 3, opacity: 0.95, interactive: false, lineCap: 'round', lineJoin: 'round' }).addTo(map);
       closer = L.polyline([], { pane: 'draw', color: '#fff', weight: 1.5, dashArray: '3 7', opacity: 0.7, interactive: false }).addTo(map);
@@ -656,6 +691,7 @@
       c.removeEventListener('pointerdown', down); c.removeEventListener('pointermove', move);
       c.removeEventListener('pointerup', up); c.removeEventListener('pointercancel', up);
       if (line) { map.removeLayer(line); map.removeLayer(closer); }
+      clearPending();
     };
   }
 
@@ -691,7 +727,71 @@
     });
   }
 
+  // --- разрез линией: проводим линию, страна делится на две части, кликом выбираем, какую передать ---
+  function clearPending() {
+    const m = ui.mode;
+    if (m && m.pending) { m.pending.layers.forEach((l) => map.removeLayer(l)); m.pending = null; }
+  }
+  function refreshPending() {
+    const m = ui.mode;
+    if (!m || !m.pending) return;
+    const pieces = m.pending.pieces;
+    clearPending();
+    showPieces(pieces);
+  }
+  function showPieces(pieces) {
+    const m = ui.mode;
+    const src = findRegion(m.source), target = findRegion(m.target);
+    if (!src || !target) return;
+    const layers = pieces.map((piece) => {
+      const base = { color: '#ffffff', weight: 2, dashArray: '5 4', opacity: 0.95, fillColor: '#ffffff', fillOpacity: 0.16, className: 'pick-piece' };
+      const l = L.geoJSON({ type: 'Feature', geometry: asGeom(piece), properties: {} }, { pane: 'draw', style: () => base }).addTo(map);
+      l.bindTooltip(`Передать эту часть → ${target.region.name}`, { sticky: true, className: 'hover-tip', direction: 'top', offset: [0, -4] });
+      l.on('mouseover', () => l.setStyle({ fillColor: target.side.color, fillOpacity: 0.78, dashArray: null }));
+      l.on('mouseout', () => l.setStyle(base));
+      l.on('click', (ev) => {
+        L.DomEvent.stopPropagation(ev);
+        const cur2 = findRegion(m.target);
+        clearPending();
+        try { commit(cur2, piece, [findRegion(m.source)], `Передано: ${src.region.name} → ${cur2.region.name}`); }
+        catch (err) { console.error(err); toast('Не получилось передать эту часть'); }
+      });
+      return l;
+    });
+    m.pending = { layers, pieces };
+  }
+
+  function finishLine(latlngs) {
+    const m = ui.mode, src = findRegion(m.source);
+    if (!src) return;
+    if (latlngs.length < 3) { toast('Проведи линию подлиннее — зажми кнопку и веди'); return; }
+    const px = latlngs.map((l) => map.latLngToLayerPoint(l));
+    const simple = L.LineUtil.simplify(px, 2).map((p) => map.layerPointToLatLng(p));
+    let pts = simple.map((l) => [l.lng, l.lat]);
+    pts = smoothOpen(roughenOpen(pts, (P.rough / 100) * 0.5));
+    // продлеваем концы далеко за пределы страны — разрез проходит сквозь неё целиком
+    const D = 40, unit = (a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1], n = Math.hypot(dx, dy) || 1; return [dx / n, dy / n]; };
+    const u0 = unit(pts[1], pts[0]), u1 = unit(pts[pts.length - 2], pts[pts.length - 1]);
+    const e0 = [pts[0][0] + u0[0] * D, pts[0][1] + u0[1] * D], e1 = [pts[pts.length - 1][0] + u1[0] * D, pts[pts.length - 1][1] + u1[1] * D];
+    const line = [e0, ...pts, e1];
+    const n0 = unit(line[0], line[1]), n1 = unit(line[line.length - 2], line[line.length - 1]);
+    // «левая» сторона линии: сама линия + две далёкие точки слева
+    const left = [...line, [e1[0] - n1[1] * D, e1[1] + n1[0] * D], [e0[0] - n0[1] * D, e0[1] + n0[0] * D], e0];
+    try {
+      const sm = toMulti(src.region.geometry);
+      const a = pc.intersection(sm, [[left]]);
+      const b = pc.difference(sm, [[left]]);
+      if (!a.length || !b.length) { toast('Линия не разрезала страну — проведи её от одной границы до другой'); return; }
+      showPieces([a, b]);
+      toast('Кликни по части, которую нужно передать');
+    } catch (err) {
+      console.error(err);
+      toast('Не получилось разрезать — проведи линию без петель');
+    }
+  }
+
   function finishStroke(latlngs) {
+    if (ui.mode && ui.mode.kind === 'give' && P.tool === 'line') { finishLine(latlngs); return; }
     if (latlngs.length < 6) { toast('Зажми кнопку и обведи участок, не отпуская'); return; }
     const px = latlngs.map((l) => map.latLngToLayerPoint(l));
     const simple = L.LineUtil.simplify(px, 2.5).map((p) => map.layerPointToLatLng(p));
@@ -1025,10 +1125,11 @@
   async function boot() {
     try {
       const saved = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}');
-      P = { ...DEFAULT_PREFS, ...saved, cities: { ...DEFAULT_PREFS.cities, ...(saved.cities || {}) } };
+      P = { ...DEFAULT_PREFS, ...saved, cities: { ...DEFAULT_PREFS.cities, ...(saved.cities || {}) }, fold: { ...DEFAULT_PREFS.fold, ...(saved.fold || {}) } };
     } catch (e) { /* по умолчанию */ }
     if (!MAP_STYLES[P.style]) P.style = 'dark';
     syncCityUi();
+    setFold('panel', P.fold.panel, true); setFold('timeline', P.fold.timeline, true);
     setStyle(P.style, true);
     setFill(P.fill === 'flag' ? 'flag' : 'color', true);
     try {
