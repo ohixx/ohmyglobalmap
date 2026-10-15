@@ -97,6 +97,17 @@
   }
   const inMulti = (mp, x, y) => mp.some((poly) => inRing(poly[0], x, y) && !poly.slice(1).some((hole) => inRing(hole, x, y)));
 
+  // булевы операции только над теми частями мультиполигона, которых они касаются — остальное не трогаем
+  const polyBox = (p) => bbox([p]);
+  function splitHit(mp, bb) {
+    const hit = [], miss = [];
+    for (const p of mp) (bbHit(polyBox(p), bb) ? hit : miss).push(p);
+    return { hit, miss };
+  }
+  const pcIntersect = (mp, other) => { const { hit } = splitHit(mp, bbox(other)); return hit.length ? pc.intersection(hit, other) : []; };
+  const pcDiff = (mp, piece) => { const { hit, miss } = splitHit(mp, bbox(piece)); return hit.length ? [...miss, ...pc.difference(hit, piece)] : mp; };
+  const pcUnion = (mp, piece) => { const { hit, miss } = splitHit(mp, bbox(piece)); return [...miss, ...(hit.length ? pc.union(hit, piece) : pc.union(piece))]; };
+
   // центр самого крупного куска (для подписей)
   function labelPoint(geom) {
     let best = null, bestA = -1;
@@ -180,7 +191,7 @@
 
   // ---------- данные ----------
   const eraData = {};            // id -> {list:[{key,name,sub,flag,geometry,named,mp,bb}], byKey:Map}
-  let modernTopo = null, csTopo = null, csFeats = null, histRu = {}, ruByEng = {}, gwA2 = {}, flagSet = new Set(), cities = [];
+  let modernTopo = null, modernLod = null, csTopo = null, csFeats = null, histRu = {}, ruByEng = {}, gwA2 = {}, flagSet = new Set(), cities = [];
 
   const STABLE_FLAG = new Set([2, 200, 220, 210, 225, 380, 385, 390, 740, 160, 155]);
   function csFlag(gw, status, year) {
@@ -200,10 +211,11 @@
     const kind = ERAS[eraIndex(id)].kind;
     const list = [];
     if (kind === 'now') {
+      const lodMap = new Map(topojson.feature(modernLod, modernLod.objects.countries).features.map((f) => [f.properties.k, f.geometry]));
       for (const f of topojson.feature(modernTopo, modernTopo.objects.countries).features) {
         const p = f.properties;
         ruByEng[p.n] = p.r;
-        list.push({ key: p.k, name: p.r, flag: p.a && flagSet.has(p.a) ? p.a : null, geometry: f.geometry, named: true });
+        list.push({ key: p.k, name: p.r, flag: p.a && flagSet.has(p.a) ? p.a : null, geometry: f.geometry, lod: lodMap.get(p.k), named: true });
       }
     } else if (kind === 'cs') {
       if (!csFeats) {
@@ -334,9 +346,9 @@
   const regionsGroup = L.featureGroup().addTo(map);
   const labelsGroup = L.layerGroup().addTo(map);
   const layerByRid = new Map();
-  const neutralCanvas = L.canvas({ pane: 'neutral' });
-  const backdropCanvas = L.canvas({ pane: 'backdrop' });
-  const svgR = L.svg({ pane: 'regions' }).addTo(map);
+  const neutralCanvas = L.canvas({ pane: 'neutral', padding: 0.5 });
+  const backdropCanvas = L.canvas({ pane: 'backdrop', padding: 0.5 });
+  const svgR = L.svg({ pane: 'regions', padding: 0.4 }).addTo(map);
   const S = () => MAP_STYLES[P.style];
 
   // флаги как заливка: SVG-паттерны
@@ -356,33 +368,66 @@
     return `url(#fl-${id})`;
   }
 
+  // LOD: на мировом масштабе рисуем упрощённые границы — в 10 раз меньше точек, карта не тормозит
+  let lodOn = true;
+  const wantLod = () => map.getZoom() < 4;
+  const geomOf = (e) => (lodOn && e.lod ? e.lod : e.geometry);
+  const poly = (geometry, opts) => L.GeoJSON.geometryToLayer({ type: 'Feature', geometry, properties: {} }, opts);
+
   function neutralTip(e) {
     return h('div', {}, e.name, e.sub ? h('small', {}, e.sub) : null);
   }
 
-  function rebuildNeutral() {
-    neutralGroup.clearLayers(); backdropGroup.clearLayers();
-    const data = eraData[cur];
-    if (ERAS[eraIndex(cur)].kind === 'cs' && S().backdrop && eraData.now) {
-      for (const e of eraData.now.list) {
-        backdropGroup.addLayer(L.geoJSON({ type: 'Feature', geometry: e.geometry, properties: {} }, {
-          pane: 'backdrop', renderer: backdropCanvas, interactive: false, style: () => ({ stroke: false, fillColor: S().backdrop, fillOpacity: 1 }),
-        }));
-      }
-    }
-    for (const e of data.list) {
-      const l = L.geoJSON({ type: 'Feature', geometry: e.geometry, properties: {} }, {
-        pane: 'neutral', renderer: neutralCanvas, style: () => S().neutral, interactive: e.named,
+  // Слои стран создаются лениво и держатся на карте только пока попадают в видимую область —
+  // иначе Leaflet заново проецирует сотни тысяч точек при каждом зуме.
+  function makeNeutral(e) {
+    const l = poly(geomOf(e), { pane: 'neutral', renderer: neutralCanvas, interactive: e.named, smoothFactor: 1.2, ...S().neutral });
+    if (e.named) {
+      l.on('mouseover', (ev) => {
+        if (!l.getTooltip()) { l.bindTooltip(neutralTip(e), { sticky: true, className: 'hover-tip', direction: 'top', offset: [0, -6] }); l.openTooltip(ev.latlng); }
+        if (!ui.mode) l.setStyle(S().hover);
       });
-      if (e.named) {
-        l.bindTooltip(neutralTip(e), { sticky: true, className: 'hover-tip', direction: 'top', offset: [0, -6] });
-        l.on('mouseover', () => { if (!ui.mode) l.setStyle(S().hover); });
-        l.on('mouseout', () => l.setStyle(S().neutral));
-        l.on('click', (ev) => onNeutralClick(e, ev));
-      }
-      neutralGroup.addLayer(l);
+      l.on('mouseout', () => l.setStyle(S().neutral));
+      l.on('click', (ev) => onNeutralClick(e, ev));
+    }
+    return l;
+  }
+  const makeBackdrop = (e) => poly(geomOf(e), { pane: 'backdrop', renderer: backdropCanvas, interactive: false, stroke: false, fillColor: S().backdrop, fillOpacity: 1 });
+
+  function syncGroup(group, list, prop, make, vb) {
+    for (const e of list) {
+      const vis = bbHit(e.bb, vb), l = e[prop];
+      if (vis) {
+        if (!l) group.addLayer(e[prop] = make(e));
+        else if (!group.hasLayer(l)) group.addLayer(l);
+      } else if (l && group.hasLayer(l)) group.removeLayer(l);
     }
   }
+  function syncNeutral() {
+    const data = eraData[cur];
+    if (!data) return;
+    const b = map.getBounds().pad(0.3), vb = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
+    syncGroup(neutralGroup, data.list, '_nl', makeNeutral, vb);
+    if (backdropOn()) syncGroup(backdropGroup, eraData.now.list, '_bl', makeBackdrop, vb);
+  }
+  const backdropOn = () => ERAS[eraIndex(cur)].kind === 'cs' && S().backdrop && eraData.now;
+  function rebuildNeutral() {
+    neutralGroup.clearLayers(); backdropGroup.clearLayers();
+    for (const e of eraData[cur].list) e._nl = null;
+    if (eraData.now) for (const e of eraData.now.list) e._bl = null;
+    syncNeutral();
+  }
+  map.on('moveend', syncNeutral);
+  // при длинном перетаскивании дорисовываем новые страны заранее, не дожидаясь отпускания мыши
+  let moveTimer = null;
+  map.on('move', () => {
+    if (moveTimer || map._animatingZoom) return;
+    moveTimer = setTimeout(() => {
+      moveTimer = null;
+      const m = map, vp = L.bounds(m.containerPointToLayerPoint([0, 0]), m.containerPointToLayerPoint(m.getSize()));
+      if (neutralCanvas._bounds && !neutralCanvas._bounds.contains(vp)) { syncNeutral(); neutralCanvas._update(); backdropCanvas._update(); }
+    }, 70);
+  });
 
   function regionStyle(side, region, hover) {
     const r = S().region;
@@ -395,61 +440,100 @@
     };
   }
 
+  // слои регионов живут в кэше: пересобираются только изменившиеся
+  const regCache = new Map();
+  function dropRegion(id) {
+    const c = regCache.get(id);
+    if (!c) return;
+    regionsGroup.removeLayer(c.layer); labelsGroup.removeLayer(c.label);
+    regCache.delete(id); layerByRid.delete(id);
+  }
   function rebuildRegions() {
-    regionsGroup.clearLayers(); labelsGroup.clearLayers(); layerByRid.clear();
-    const data = eraData[cur];
+    const data = eraData[cur], alive = new Set();
     for (const { side, region } of eraRegions()) {
+      const en = region.code ? data.byKey.get(region.code) : null;
       if (!region.geometry) {
-        const e = data.byKey.get(region.code);
-        if (!e) continue;
-        region.geometry = e.geometry;
+        if (!en) continue;
+        region.geometry = en.geometry;
       }
-      const layer = L.geoJSON({ type: 'Feature', geometry: region.geometry, properties: {} }, { pane: 'regions', renderer: svgR, style: () => regionStyle(side, region) }).getLayers()[0];
+      const geom = lodOn && !region.edited && en && en.lod ? en.lod : region.geometry;
+      alive.add(region.id);
+      const c = regCache.get(region.id);
+      if (c && c.geom === geom && c.color === side.color && c.name === region.name && c.fill === P.fill && c.style === P.style) continue;
+      dropRegion(region.id);
+      const layer = poly(geom, { pane: 'regions', renderer: svgR, ...regionStyle(side, region) });
       layer.on('mouseover', () => { if (!ui.mode) layer.setStyle(regionStyle(side, region, true)); });
       layer.on('mouseout', () => layer.setStyle(regionStyle(side, region)));
       layer.on('click', (e) => onRegionClick(region.id, e));
-      regionsGroup.addLayer(layer);
+      const label = L.tooltip({ permanent: true, direction: 'center', className: 'map-label', interactive: false }).setLatLng(labelPoint(region.geometry)).setContent(region.name);
+      regionsGroup.addLayer(layer); labelsGroup.addLayer(label);
       layerByRid.set(region.id, layer);
-      labelsGroup.addLayer(L.tooltip({ permanent: true, direction: 'center', className: 'map-label', interactive: false })
-        .setLatLng(labelPoint(region.geometry)).setContent(region.name));
+      regCache.set(region.id, { layer, label, geom, color: side.color, name: region.name, fill: P.fill, style: P.style });
     }
+    for (const id of [...regCache.keys()]) if (!alive.has(id)) dropRegion(id);
     updateLabelVisibility();
   }
   const updateLabelVisibility = () => map.getContainer().classList.toggle('labels-hidden', map.getZoom() < 3);
-  map.on('zoomend', updateLabelVisibility);
+  map.on('zoomend', () => {
+    updateLabelVisibility();
+    if (wantLod() !== lodOn && eraData[cur]) { lodOn = wantLod(); rebuildNeutral(); rebuildRegions(); }
+  });
 
   // ---------- города ----------
+  // Рендерер Leaflet: холст шире экрана и двигается вместе с картой (без отставания), при зуме масштабируется анимацией.
   const ZOOM_POP = { 2: 6e6, 3: 2.5e6, 4: 9e5, 5: 3e5, 6: 1.1e5, 7: 4e4, 8: 1.2e4 };
-  const CityLayer = L.Layer.extend({
-    onAdd(m) {
-      this._c = L.DomUtil.create('canvas', 'city-canvas');
-      m.getPane('cities').appendChild(this._c);
-      m.on('moveend zoomend resize viewreset', this.redraw, this);
-      this.redraw();
+  const CityRenderer = L.Renderer.extend({
+    options: { padding: 0.35, pane: 'cities' },
+    _initContainer() { this._container = L.DomUtil.create('canvas', 'city-canvas'); this._ctx = this._container.getContext('2d'); },
+    _destroyContainer() { L.DomUtil.remove(this._container); delete this._container; delete this._ctx; },
+    _updatePaths() {},
+    getEvents() { const e = L.Renderer.prototype.getEvents.call(this); e.move = this._onMove; return e; },
+    _onMove() {
+      const m = this._map;
+      if (!this._bounds || m._animatingZoom) return;
+      const vp = L.bounds(m.containerPointToLayerPoint([0, 0]), m.containerPointToLayerPoint(m.getSize()));
+      if (!this._bounds.contains(vp)) this._update();   // дотянули до края запаса — перерисовать заранее
     },
-    onRemove(m) { L.DomUtil.remove(this._c); m.off('moveend zoomend resize viewreset', this.redraw, this); },
-    redraw() {
-      const m = this._map, c = this._c;
-      if (!m || !c) return;
-      const sz = m.getSize(), dpr = window.devicePixelRatio || 1;
-      c.width = sz.x * dpr; c.height = sz.y * dpr; c.style.width = sz.x + 'px'; c.style.height = sz.y + 'px';
-      L.DomUtil.setPosition(c, m.containerPointToLayerPoint([0, 0]));
-      const ctx = c.getContext('2d');
-      ctx.scale(dpr, dpr);
-      const o = P.cities;
+    _update() {
+      const m = this._map, c = this._container;
+      if (!m || !c || (m._animatingZoom && this._bounds)) return;
+      L.Renderer.prototype._update.call(this);
+      const b = this._bounds, size = b.getSize(), dpr = window.devicePixelRatio || 1;
+      c.width = Math.round(size.x * dpr); c.height = Math.round(size.y * dpr);
+      c.style.width = size.x + 'px'; c.style.height = size.y + 'px';
+      L.DomUtil.setPosition(c, b.min);
+      this._draw(dpr);
+    },
+    redraw() { if (this._map) this._update(); },
+    _draw(dpr) {
+      const o = P.cities, m = this._map, ctx = this._ctx, b = this._bounds;
       if (!o.show || !cities.length) return;
+      ctx.setTransform(dpr, 0, 0, dpr, -b.min.x * dpr, -b.min.y * dpr);
       const z = m.getZoom(), zi = Math.max(2, Math.min(9, Math.floor(z)));
       const factor = Math.pow(2, (50 - o.density) / 22);
-      const thr = (ZOOM_POP[zi] || 0) * factor;
-      const k = o.size / 100;
+      const thr = (ZOOM_POP[zi] || 0) * factor, k = o.size / 100;
+      const nw = m.layerPointToLatLng(b.min), se = m.layerPointToLatLng(b.max);
+      const [south, north, west, east] = [se.lat, nw.lat, nw.lng, se.lng];
       ctx.font = `${Math.round(11 * k * 10) / 10}px ${getComputedStyle(document.body).fontFamily}`;
       ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
-      const used = [];
-      const bounds = m.getBounds().pad(0.05);
-      for (const [lon, lat, pop, flag, name] of cities) {
+      const grid = new Map(), CELL = 64;
+      const free = (box) => {
+        for (let gx = Math.floor(box[0] / CELL); gx <= Math.floor(box[2] / CELL); gx++) for (let gy = Math.floor(box[1] / CELL); gy <= Math.floor(box[3] / CELL); gy++) {
+          for (const u of grid.get(gx + ',' + gy) || []) if (box[0] < u[2] && box[2] > u[0] && box[1] < u[3] && box[3] > u[1]) return false;
+        }
+        return true;
+      };
+      const put = (box) => {
+        for (let gx = Math.floor(box[0] / CELL); gx <= Math.floor(box[2] / CELL); gx++) for (let gy = Math.floor(box[1] / CELL); gy <= Math.floor(box[3] / CELL); gy++) {
+          const key = gx + ',' + gy;
+          (grid.get(key) || grid.set(key, []).get(key)).push(box);
+        }
+      };
+      for (let i = 0; i < cities.length; i++) {
+        const [lon, lat, pop, flag, name] = cities[i];
         if (o.caps ? !(flag === 1 && (z >= 3 || pop >= 3e6 * factor)) : !(pop >= thr || (flag === 1 && pop >= thr * 0.15))) continue;
-        if (!bounds.contains([lat, lon])) continue;
-        const p = m.latLngToContainerPoint([lat, lon]);
+        if (lat < south || lat > north || lon < west || lon > east) continue;
+        const p = m.latLngToLayerPoint([lat, lon]);
         const r = (flag === 1 ? 3.4 : 2.4) * k;
         ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, 6.2832);
         ctx.fillStyle = '#fff'; ctx.fill();
@@ -457,14 +541,14 @@
         if (!o.labels) continue;
         const w = ctx.measureText(name).width, x = p.x + r + 4, y = p.y;
         const box = [x - 2, y - 7 * k, x + w + 2, y + 7 * k];
-        if (used.some((u) => box[0] < u[2] && box[2] > u[0] && box[1] < u[3] && box[3] > u[1])) continue;
-        used.push(box);
+        if (!free(box)) continue;
+        put(box);
         ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(8,8,8,.78)'; ctx.strokeText(name, x, y);
         ctx.fillStyle = flag === 1 ? '#fff' : 'rgba(255,255,255,.92)'; ctx.fillText(name, x, y);
       }
     },
   });
-  const cityLayer = new CityLayer().addTo(map);
+  const cityLayer = new CityRenderer().addTo(map);
 
   // ---------- стиль карты ----------
   let tileLayers = [], tileErrorShown = false;
@@ -479,7 +563,11 @@
       l.on('tileerror', () => { if (!tileErrorShown) { tileErrorShown = true; toast('Не удалось загрузить подложку — проверь интернет'); } });
       return l;
     });
-    if (eraData[cur]) { rebuildNeutral(); rebuildRegions(); }
+    if (eraData[cur]) {
+      if (ERAS[eraIndex(cur)].kind === 'cs') rebuildNeutral();
+      else neutralGroup.eachLayer((l) => l.setStyle(st.neutral));
+      rebuildRegions();
+    }
     document.querySelectorAll('#styleBar button').forEach((b) => b.classList.toggle('on', b.dataset.id === id));
     if (!quiet) savePrefs();
   }
@@ -603,10 +691,10 @@
   function setMode(m) { endMode(); ui.mode = m; }
 
   function startMode(m) {
-    const need = m.kind === 'give' ? 2 : 1;
-    if (eraRegions().length < need) { toast('Добавь ещё хотя бы одну страну, чтобы передать ей территорию'); return; }
     setMode(m);
     map.closePopup();
+    if (m.kind === 'give') { const src = findRegion(m.source); m.newSide = src ? src.side.id : null; }
+    if (m.kind === 'take') m.from = m.from || 'added';
     if (m.kind === 'fill') {
       map.getContainer().style.cursor = 'crosshair';
       map.on('click', onFillClick);
@@ -619,33 +707,75 @@
     renderBanner();
   }
 
+  // получатель: уже добавленная страна (id региона) или любая другая страна эпохи ('e:ключ') — тогда она добавится в выбранную сторону
+  const isEntryTarget = (m) => typeof m.target === 'string' && m.target.startsWith('e:');
+  function targetInfo(m) {
+    if (isEntryTarget(m)) {
+      const e = eraData[cur].byKey.get(m.target.slice(2)), side = sideById(m.newSide);
+      return e ? { name: e.name, color: side ? side.color : '#ffffff' } : null;
+    }
+    const t = findRegion(m.target);
+    return t ? { name: t.region.name, color: t.side.color } : null;
+  }
+  function targetMaker(m) {
+    if (!isEntryTarget(m)) return () => findRegion(m.target);
+    const key = m.target.slice(2), sid = m.newSide;
+    return () => {
+      const e = eraData[cur].byKey.get(key), side = sideById(sid);
+      if (!e || !side) return null;
+      const ex = findByCode(key);
+      if (ex) return ex;
+      const region = { id: uid(), name: e.name, era: cur, code: key, geometry: e.geometry, edited: false };
+      side.regions.push(region);
+      ui.open.add(side.id);
+      return { side, region };
+    };
+  }
+
   function renderBanner() {
     const m = ui.mode;
     if (!m) return;
     const tools = [];
     let text;
+    const entries = () => eraData[cur].list.filter((e) => e.named).sort((a, b) => a.name.localeCompare(b.name, 'ru'));
     if (m.kind === 'give') {
       const src = findRegion(m.source);
+      if (!src) { endMode(); return; }
       const others = eraRegions().filter((x) => x.region.id !== m.source);
-      if (!src || !others.length) { endMode(); return; }
-      if (!others.some((x) => x.region.id === m.target)) m.target = others[0].region.id;
+      const free = entries().filter((e) => e.key !== src.region.code && !findByCode(e.key));
+      const valid = (id) => others.some((x) => x.region.id === id) || (typeof id === 'string' && id.startsWith('e:') && free.some((e) => 'e:' + e.key === id));
+      if (!valid(m.target)) m.target = others.length ? others[0].region.id : free.length ? 'e:' + free[0].key : null;
+      if (!sideById(m.newSide)) m.newSide = src.side.id;
       text = P.tool === 'line'
         ? ['Проведи линию через «', h('b', {}, src.region.name), '» от границы до границы, затем кликни по части, которая перейдёт к:']
         : ['Обведи от руки участок «', h('b', {}, src.region.name), '» — он перейдёт к:'];
       tools.push(h('div', { class: 'seg' }, [['line', 'Линия'], ['loop', 'Обвести']].map(([id, label]) =>
         h('button', { class: P.tool === id ? 'on' : '', title: id === 'line' ? 'Разрезать страну линией и выбрать часть' : 'Обвести участок контуром', onclick: () => { P.tool = id; clearPending(); savePrefs(); renderBanner(); } }, label))));
-      const sel = h('select', { onchange: () => { m.target = sel.value; refreshPending(); } });
+      const sel = h('select', { title: 'Кому передать', onchange: () => { m.target = sel.value; refreshPending(); renderBanner(); } });
       for (const s of state.sides) {
         const opts = others.filter((x) => x.side === s);
         if (opts.length) sel.append(h('optgroup', { label: s.name }, opts.map((x) => h('option', { value: x.region.id, selected: x.region.id === m.target }, x.region.name))));
       }
+      if (free.length) sel.append(h('optgroup', { label: 'Не добавлены в стороны' }, free.map((e) => h('option', { value: 'e:' + e.key, selected: 'e:' + e.key === m.target }, e.name))));
       tools.push(sel);
+      if (isEntryTarget(m)) {
+        const ss = h('select', { title: 'В какую сторону добавить получателя', onchange: () => { m.newSide = ss.value; refreshPending(); } },
+          state.sides.map((s) => h('option', { value: s.id, selected: s.id === m.newSide }, s.name)));
+        tools.push(h('label', {}, 'в сторону', ss));
+      }
     } else {
       const t = findRegion(m.target);
       if (!t) { endMode(); return; }
-      text = m.kind === 'fill'
-        ? ['Кликай по странам и областям — они целиком отойдут к «', h('b', {}, t.region.name), '».']
-        : ['Обведи любую землю — она отойдёт к «', h('b', {}, t.region.name), '», а у соседей отберётся.'];
+      if (m.kind === 'fill') {
+        text = ['Кликай по странам и областям — они целиком отойдут к «', h('b', {}, t.region.name), '».'];
+      } else {
+        text = ['Обведи землю — она отойдёт к «', h('b', {}, t.region.name), '». Забирать:'];
+        const from = h('select', { title: 'У кого забирать землю', onchange: () => { m.from = from.value; } },
+          h('option', { value: 'added', selected: m.from === 'added' }, 'только у добавленных стран'),
+          h('option', { value: 'any', selected: m.from === 'any' }, 'у любых, включая нейтральные'),
+          h('optgroup', { label: 'Только у страны…' }, entries().map((e) => h('option', { value: 'e:' + e.key, selected: m.from === 'e:' + e.key }, e.name))));
+        tools.push(from);
+      }
     }
     if (m.kind !== 'fill') {
       const rough = h('input', { type: 'range', min: 0, max: 100, value: P.rough, title: 'Насколько неровной будет граница' });
@@ -741,19 +871,18 @@
   }
   function showPieces(pieces) {
     const m = ui.mode;
-    const src = findRegion(m.source), target = findRegion(m.target);
-    if (!src || !target) return;
+    const src = findRegion(m.source), info = targetInfo(m);
+    if (!src || !info) return;
     const layers = pieces.map((piece) => {
       const base = { color: '#ffffff', weight: 2, dashArray: '5 4', opacity: 0.95, fillColor: '#ffffff', fillOpacity: 0.16, className: 'pick-piece' };
-      const l = L.geoJSON({ type: 'Feature', geometry: asGeom(piece), properties: {} }, { pane: 'draw', style: () => base }).addTo(map);
-      l.bindTooltip(`Передать эту часть → ${target.region.name}`, { sticky: true, className: 'hover-tip', direction: 'top', offset: [0, -4] });
-      l.on('mouseover', () => l.setStyle({ fillColor: target.side.color, fillOpacity: 0.78, dashArray: null }));
+      const l = poly(asGeom(piece), { pane: 'draw', ...base }).addTo(map);
+      l.bindTooltip(`Передать эту часть → ${info.name}`, { sticky: true, className: 'hover-tip', direction: 'top', offset: [0, -4] });
+      l.on('mouseover', () => l.setStyle({ fillColor: info.color, fillOpacity: 0.78, dashArray: null }));
       l.on('mouseout', () => l.setStyle(base));
       l.on('click', (ev) => {
         L.DomEvent.stopPropagation(ev);
-        const cur2 = findRegion(m.target);
         clearPending();
-        try { commit(cur2, piece, [findRegion(m.source)], `Передано: ${src.region.name} → ${cur2.region.name}`); }
+        try { commit(targetMaker(m), piece, [findRegion(m.source)], `Передано: ${src.region.name} → ${info.name}`); }
         catch (err) { console.error(err); toast('Не получилось передать эту часть'); }
       });
       return l;
@@ -779,8 +908,8 @@
     const left = [...line, [e1[0] - n1[1] * D, e1[1] + n1[0] * D], [e0[0] - n0[1] * D, e0[1] + n0[0] * D], e0];
     try {
       const sm = toMulti(src.region.geometry);
-      const a = pc.intersection(sm, [[left]]);
-      const b = pc.difference(sm, [[left]]);
+      const a = pcIntersect(sm, [[left]]);
+      const b = pcDiff(sm, [[left]]);
       if (!a.length || !b.length) { toast('Линия не разрезала страну — проведи её от одной границы до другой'); return; }
       showPieces([a, b]);
       toast('Кликни по части, которую нужно передать');
@@ -805,18 +934,22 @@
   // общий коммит: piece отходит target, у victims вычитается
   function commit(target, piece, victims, doneMsg) {
     snapshot();
+    const tgt = typeof target === 'function' ? target() : target;
+    if (!tgt) { history.pop(); undoBtn.disabled = history.length === 0; toast('Не выбрана страна-получатель'); return; }
     const pb = bbox(piece);
     const removed = [];
     for (const v of victims) {
+      if (!v || v.region === tgt.region) continue;
       const geom = toMulti(v.region.geometry);
       if (!bbHit(bbox(geom), pb)) continue;
-      const left = pc.difference(geom, piece);
+      const left = pcDiff(geom, piece);
       if (!left.length) removed.push(v);
       else { v.region.geometry = asGeom(left); v.region.edited = true; }
     }
     for (const v of removed) v.side.regions.splice(v.side.regions.indexOf(v.region), 1);
-    target.region.geometry = asGeom(pc.union(toMulti(target.region.geometry), piece));
-    target.region.edited = true;
+    tgt.region.geometry = asGeom(pcUnion(toMulti(tgt.region.geometry), piece));
+    tgt.region.edited = true;
+    if (ui.mode) ui.mode.target = tgt.region.id;
     if (doneMsg) toast(doneMsg);
     save(); rebuildRegions(); renderSides(); renderBanner();
   }
@@ -827,20 +960,28 @@
     const drawn = [[ring]];
     const db = bbox(drawn);
     try {
-      const target = findRegion(m.target);
-      if (!target) return;
       if (m.kind === 'give') {
-        const src = findRegion(m.source);
-        if (!src) return;
-        const piece = pc.intersection(toMulti(src.region.geometry), drawn);
+        const src = findRegion(m.source), info = targetInfo(m);
+        if (!src || !info) return;
+        const piece = pcIntersect(toMulti(src.region.geometry), drawn);
         if (!piece.length) { toast('Обведи участок внутри этой страны'); return; }
-        commit(target, piece, [src], `Передано: ${src.region.name} → ${target.region.name}`);
+        commit(targetMaker(m), piece, [src], `Передано: ${src.region.name} → ${info.name}`);
       } else {
-        const parts = []; // только суша: океан не раздаём
-        for (const e of eraData[cur].list) if (bbHit(e.bb, db)) parts.push(pc.intersection(e.mp, drawn));
+        const target = findRegion(m.target);
+        if (!target) return;
+        const others = eraRegions().filter((x) => x.region.id !== m.target);
+        const parts = [];
+        if (m.from === 'any') {
+          for (const e of eraData[cur].list) if (bbHit(e.bb, db)) parts.push(pcIntersect(e.mp, drawn));
+        } else if (m.from && m.from.startsWith('e:')) {
+          const e = eraData[cur].byKey.get(m.from.slice(2));
+          if (e && bbHit(e.bb, db)) parts.push(pcIntersect(e.mp, drawn));
+        } else {
+          for (const x of others) { const g = toMulti(x.region.geometry); if (bbHit(bbox(g), db)) parts.push(pcIntersect(g, drawn)); }
+        }
         const flat = parts.filter((p) => p.length);
-        if (!flat.length) { toast('Здесь нечего занять — обведи сушу'); return; }
-        commit(target, pc.union(...flat), eraRegions().filter((x) => x.region.id !== m.target));
+        if (!flat.length) { toast(m.from === 'added' ? 'Здесь нет земель добавленных стран — выбери «у любых», чтобы занять нейтральные' : 'Здесь нечего занять — обведи сушу'); return; }
+        commit(target, flat.length > 1 ? pc.union(...flat) : flat[0], others);
       }
     } catch (err) {
       console.error(err);
@@ -1133,14 +1274,15 @@
     setStyle(P.style, true);
     setFill(P.fill === 'flag' ? 'flag' : 'color', true);
     try {
-      const [topo, hist, a2, flags, cts] = await Promise.all([
+      const [topo, lodTopo, hist, a2, flags, cts] = await Promise.all([
         fetch('data/countries10.json').then((r) => r.json()),
+        fetch('data/countries10-lod.json').then((r) => r.json()),
         fetch('data/names-hist-ru.json').then((r) => r.json()),
         fetch('data/gw-a2.json').then((r) => r.json()),
         fetch('data/flags.json').then((r) => r.json()),
         fetch('data/cities.json').then((r) => r.json()),
       ]);
-      modernTopo = topo; histRu = hist; gwA2 = a2; flagSet = new Set(flags); cities = cts;
+      modernTopo = topo; modernLod = lodTopo; histRu = hist; gwA2 = a2; flagSet = new Set(flags); cities = cts;
       await loadEra('now');
     } catch (err) {
       toast('Не удалось загрузить данные карты. Открой сайт через веб-сервер.');
@@ -1153,6 +1295,7 @@
     await loadEra(startEra).catch(() => null);
     cur = eraData[startEra] ? startEra : 'now';
     showEraUi(cur);
+    lodOn = wantLod();
     rebuildNeutral();
     rebuildRegions();
     renderSides();
