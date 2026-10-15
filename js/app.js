@@ -4,6 +4,7 @@
 (() => {
   'use strict';
 
+  const V = '20261015c'; // версия сборки: меняется при каждом обновлении, чтобы браузер не держал старые данные
   const STORE_KEY = 'omgm.v1';
   const PREFS_KEY = 'omgm.prefs';
   const PALETTE = ['#d97757', '#6a9bcc', '#788c5d', '#b07aa1', '#c9a227', '#4e9a9a', '#c25b5b', '#8b7ec8', '#9a8c6c', '#5b8a72'];
@@ -219,7 +220,7 @@
       }
     } else if (kind === 'cs') {
       if (!csFeats) {
-        csTopo = await fetch('data/cshapes.json').then((r) => r.json());
+        csTopo = await fetch('data/cshapes.json?v=' + V).then((r) => r.json());
         csFeats = topojson.feature(csTopo, csTopo.objects.shapes).features.map((f) => ({ ...f.properties, geometry: fixAntimeridian(f.geometry) }));
       }
       const year = ERAS[eraIndex(id)].year, d = year * 10000 + 101;
@@ -236,7 +237,7 @@
         e.sub = STATUS_RU[e.status] + (o && o !== e ? ` · ${o.name}` : '');
       }
     } else {
-      const res = await fetch(`data/eras/${id}.json`);
+      const res = await fetch(`data/eras/${id}.json?v=${V}`);
       if (!res.ok) throw new Error('era ' + id);
       const used = new Set();
       (await res.json()).features.forEach((f, i) => {
@@ -1275,12 +1276,12 @@
     setFill(P.fill === 'flag' ? 'flag' : 'color', true);
     try {
       const [topo, lodTopo, hist, a2, flags, cts] = await Promise.all([
-        fetch('data/countries10.json').then((r) => r.json()),
-        fetch('data/countries10-lod.json').then((r) => r.json()),
-        fetch('data/names-hist-ru.json').then((r) => r.json()),
-        fetch('data/gw-a2.json').then((r) => r.json()),
-        fetch('data/flags.json').then((r) => r.json()),
-        fetch('data/cities.json').then((r) => r.json()),
+        fetch('data/countries10.json?v=' + V).then((r) => r.json()),
+        fetch('data/countries10-lod.json?v=' + V).then((r) => r.json()),
+        fetch('data/names-hist-ru.json?v=' + V).then((r) => r.json()),
+        fetch('data/gw-a2.json?v=' + V).then((r) => r.json()),
+        fetch('data/flags.json?v=' + V).then((r) => r.json()),
+        fetch('data/cities.json?v=' + V).then((r) => r.json()),
       ]);
       modernTopo = topo; modernLod = lodTopo; histRu = hist; gwA2 = a2; flagSet = new Set(flags); cities = cts;
       await loadEra('now');
