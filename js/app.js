@@ -1,37 +1,42 @@
 /* OhMyGlobalMap — карта для ВПИ-сервера.
- * Стороны → страны → территории, которые передаются рисованием от руки. Эпохи, стили карты, localStorage + экспорт в JSON. */
+ * Стороны → страны → территории, которые передаются рисованием от руки. Эпохи, стили карты, города, флаги.
+ * Данные: Natural Earth (сегодня), CShapes 2.0 (1900–2019), historical-basemaps (до 1900). */
 (() => {
   'use strict';
 
   const STORE_KEY = 'omgm.v1';
   const PREFS_KEY = 'omgm.prefs';
   const PALETTE = ['#d97757', '#6a9bcc', '#788c5d', '#b07aa1', '#c9a227', '#4e9a9a', '#c25b5b', '#8b7ec8', '#9a8c6c', '#5b8a72'];
-  const RU_FALLBACK = {
-    'Somaliland': 'Сомалиленд', 'Kosovo': 'Косово', 'N. Cyprus': 'Северный Кипр',
-    'Indian Ocean Ter.': 'Территории в Индийском океане', 'Siachen Glacier': 'Ледник Сиачен',
-  };
 
+  const BM_YEARS = [-1000, -500, -323, 100, 300, 500, 800, 1000, 1200, 1300, 1400, 1600, 1700, 1783, 1815, 1880];
   const ERAS = [
-    ['-1000', '1000 до н. э.'], ['-500', '500 до н. э.'], ['-323', '323 до н. э.'], ['100', '100 г.'], ['300', '300 г.'], ['500', '500 г.'],
-    ['800', '800 г.'], ['1000', '1000 г.'], ['1200', '1200 г.'], ['1300', '1300 г.'], ['1400', '1400 г.'], ['1600', '1600 г.'],
-    ['1700', '1700 г.'], ['1783', '1783 г.'], ['1815', '1815 г.'], ['1880', '1880 г.'], ['1914', '1914 г.'], ['1920', '1920 г.'],
-    ['1938', '1938 г.'], ['1945', '1945 г.'], ['1960', '1960 г.'], ['1994', '1994 г.'], ['now', 'Сегодня'],
-  ].map(([id, label]) => ({ id, label }));
+    ...BM_YEARS.map((y) => ({ id: String(y), year: y, kind: 'bm', label: y < 0 ? `${-y} до н. э.` : String(y) })),
+    ...Array.from({ length: 120 }, (_, i) => ({ id: 'c' + (1900 + i), year: 1900 + i, kind: 'cs', label: String(1900 + i) })),
+    { id: 'now', year: 2026, kind: 'now', label: '2026' },
+  ];
   const eraIndex = (id) => Math.max(0, ERAS.findIndex((e) => e.id === id));
+  const ERA_NOTE = { bm: 'исторические границы · приблизительно', cs: 'CShapes 2.0 · границы на 1 января', now: 'современные границы' };
+  const STATUS_RU = { c: 'колония', p: 'протекторат', o: 'оккупация', m: 'мандат' };
 
   const MAP_STYLES = {
-    dark: { label: 'Тёмная', theme: 'dark', tiles: null,
+    dark: { label: 'Тёмная', theme: 'dark', layers: [], backdrop: '#242321',
       neutral: { color: '#46453f', weight: 0.7, opacity: 1, fillColor: '#2d2c29', fillOpacity: 1 },
       hover: { fillColor: '#3b3a36', color: '#5a5952', weight: 1 }, region: { fill: 0.74, line: 0.55 } },
-    relief: { label: 'Рельеф', theme: 'light',
-      tiles: { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Shaded_Relief/MapServer/tile/{z}/{y}/{x}', attr: 'Рельеф: Esri', native: 13 },
-      neutral: { color: '#4c4b44', weight: 0.8, opacity: 0.55, fillColor: '#fff', fillOpacity: 0.001 },
-      hover: { fillColor: '#fff', fillOpacity: 0.3, weight: 1.2, opacity: 0.8 }, region: { fill: 0.62, line: 0.8 } },
+    relief: { label: 'Рельеф', theme: 'dark',
+      layers: [
+        { url: 'https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png', opt: { subdomains: 'abcd', maxNativeZoom: 19 }, attr: '© OpenStreetMap, © CARTO' },
+        { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}', opt: { maxNativeZoom: 15, className: 'hillshade', opacity: 0.8 }, attr: 'Рельеф: Esri' },
+      ],
+      neutral: { color: '#d8d4c6', weight: 0.7, opacity: 0.42, fillColor: '#fff', fillOpacity: 0.001 },
+      hover: { fillColor: '#fff', fillOpacity: 0.1, weight: 1, opacity: 0.75 }, region: { fill: 0.58, line: 0.8 } },
     sat: { label: 'Спутник', theme: 'dark',
-      tiles: { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', attr: 'Снимки: Esri, Maxar, Earthstar Geographics', native: 17 },
+      layers: [{ url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', opt: { maxNativeZoom: 17 }, attr: 'Снимки: Esri, Maxar, Earthstar Geographics' }],
       neutral: { color: '#ffffff', weight: 0.8, opacity: 0.5, fillColor: '#fff', fillOpacity: 0.001 },
       hover: { fillColor: '#fff', fillOpacity: 0.2, weight: 1.2, opacity: 0.8 }, region: { fill: 0.55, line: 0.85 } },
   };
+
+  const DEFAULT_PREFS = { style: 'dark', era: 'now', rough: 40, fill: 'color', cities: { show: true, labels: true, caps: false, density: 40, size: 100 } };
+  let P = JSON.parse(JSON.stringify(DEFAULT_PREFS));
 
   // ---------- helpers ----------
   const $ = (s) => document.querySelector(s);
@@ -52,14 +57,12 @@
 
   const ICONS = {
     chev: 'M9 6l6 6-6 6',
-    plus: 'M12 5v14M5 12h14',
     trash: 'M5 7h14M10 11v6M14 11v6M6 7l1 12h10l1-12M9 7V4h6v3',
-    pen: 'M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4 12.5-12.5z',
-    cursor: 'M5 3l14 7-6 2-2 6L5 3z',
     give: 'M4 12h14M13 6l6 6-6 6M4 5v14',
-    brush: 'M18.4 2.6l3 3-9.6 9.6-3-3 9.6-9.6zM8.8 12.2c-2 0-3.3 1.4-3.3 3.3 0 1.4-.8 2.5-2 3.1 3.8 1 7.8-.4 7.8-3.6l-2.5-2.8z',
+    brush: 'M18.4 2.6l3 3-9.6 9.6-3-3 9.6-9.6zM8.8 12.2c-2 0-3.300 1.400-3.300 3.300 0 1.400-.8 2.500-2 3.100 3.800 1 7.800-.4 7.800-3.600l-2.500-2.800z',
+    bucket: 'M5 11l7-7 7 7-7 7-7-7zM3 21h6M19 14c1.500 1.800 2 3 2 4a2 2 0 11-4 0c0-1 .5-2.200 2-4z',
   };
-  const icon = (n, s = 16) => {
+  const icon = (n, s = 14) => {
     const w = document.createElement('span');
     w.style.display = 'inline-grid';
     w.innerHTML = `<svg viewBox="0 0 24 24" width="${s}" height="${s}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="${ICONS[n]}"/></svg>`;
@@ -74,6 +77,7 @@
     toastTimer = setTimeout(() => (t.hidden = true), 2800);
   }
 
+  // ---------- геометрия ----------
   const pc = window.polygonClipping;
   const toMulti = (g) => (g.type === 'Polygon' ? [g.coordinates] : g.coordinates);
   const asGeom = (mp) => ({ type: 'MultiPolygon', coordinates: mp });
@@ -83,6 +87,15 @@
     return [x0, y0, x1, y1];
   }
   const bbHit = (a, b) => a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1];
+
+  function inRing(r, x, y) {
+    let c = false;
+    for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+      if ((r[i][1] > y) !== (r[j][1] > y) && x < ((r[j][0] - r[i][0]) * (y - r[i][1])) / (r[j][1] - r[i][1]) + r[i][0]) c = !c;
+    }
+    return c;
+  }
+  const inMulti = (mp, x, y) => mp.some((poly) => inRing(poly[0], x, y) && !poly.slice(1).some((hole) => inRing(hole, x, y)));
 
   // центр самого крупного куска (для подписей)
   function labelPoint(geom) {
@@ -99,8 +112,8 @@
     return L.latLng(best[1], best[0]);
   }
 
-  // Полигоны, пересекающие 180-й меридиан (Россия, Фиджи, США…), в исходных данных замыкаются прыжком через весь мир.
-  // Разворачиваем долготы и режем по меридиану на два куска.
+  // Полигоны, пересекающие 180-й меридиан, в части данных замыкаются прыжком через весь мир:
+  // разворачиваем долготы и режем по меридиану на два куска.
   const WORLD_E = [[[[-180, -90], [180, -90], [180, 90], [-180, 90], [-180, -90]]]];
   const WORLD_W = [[[[180, -90], [540, -90], [540, 90], [180, 90], [180, -90]]]];
   function fixAntimeridian(geom) {
@@ -138,7 +151,7 @@
     }
     return out;
   }
-  function smooth(ring) { // один проход Чайкина — убирает острые «зубцы»
+  function smooth(ring) { // проход Чайкина — убирает острые «зубцы»
     const out = [];
     for (let i = 0; i < ring.length; i++) {
       const a = ring[i], b = ring[(i + 1) % ring.length];
@@ -147,47 +160,72 @@
     return out;
   }
 
-  // ---------- данные эпох ----------
-  const eraData = {};            // id -> {list:[{key,name,geometry,named,mp,bb}], byKey:Map}
-  let ruNames = {}, histRu = {}, ruByEng = {}, modernTopo = null;
+  // ---------- данные ----------
+  const eraData = {};            // id -> {list:[{key,name,sub,flag,geometry,named,mp,bb}], byKey:Map}
+  let modernTopo = null, csTopo = null, csFeats = null, histRu = {}, ruByEng = {}, gwA2 = {}, flagSet = new Set(), cities = [];
+
+  const STABLE_FLAG = new Set([2, 200, 220, 210, 225, 380, 385, 390, 740, 160, 155]);
+  function csFlag(gw, status, year) {
+    if (gw === 365) return year < 1917 ? 'ru-imp' : year >= 1922 && year <= 1991 ? 'su' : year >= 1992 ? 'ru' : null;
+    if (gw === 255) return year <= 1918 ? 'de-imp' : year <= 1932 ? 'de' : null;
+    if (gw === 260) return 'de';
+    if (gw === 345) return year >= 1946 && year <= 1991 ? 'yu' : null;
+    if (gw === 315) return 'cs';
+    if (gw === 640) return 'tr';
+    const a2 = gwA2[gw];
+    if (!a2 || !flagSet.has(a2)) return null;
+    return status === 'i' && (year >= 1990 || STABLE_FLAG.has(gw)) ? a2 : null;
+  }
 
   async function loadEra(id) {
     if (eraData[id]) return eraData[id];
+    const kind = ERAS[eraIndex(id)].kind;
     const list = [];
-    if (id === 'now') {
-      const feats = topojson.feature(modernTopo, modernTopo.objects.countries).features.filter((f) => f.id !== '010'); // без Антарктиды
-      feats.forEach((f, i) => {
-        const key = f.id || 'x' + i;
-        const eng = f.properties.name;
-        const name = ruNames[f.id] || RU_FALLBACK[eng] || eng;
-        ruByEng[eng] = name;
-        list.push({ key, name, geometry: f.geometry, named: true });
+    if (kind === 'now') {
+      for (const f of topojson.feature(modernTopo, modernTopo.objects.countries).features) {
+        const p = f.properties;
+        ruByEng[p.n] = p.r;
+        list.push({ key: p.k, name: p.r, flag: p.a && flagSet.has(p.a) ? p.a : null, geometry: f.geometry, named: true });
+      }
+    } else if (kind === 'cs') {
+      if (!csFeats) {
+        csTopo = await fetch('data/cshapes.json').then((r) => r.json());
+        csFeats = topojson.feature(csTopo, csTopo.objects.shapes).features.map((f) => ({ ...f.properties, geometry: fixAntimeridian(f.geometry) }));
+      }
+      const year = ERAS[eraIndex(id)].year, d = year * 10000 + 101;
+      const used = new Set(), byGw = new Map();
+      csFeats.forEach((f, i) => {
+        if (f.s > d || f.e < d) return;
+        const key = used.has(String(f.g)) ? `${f.g}#${i}` : String(f.g);
+        used.add(key);
+        const e = { key, name: histRu[f.n] || ruByEng[f.n] || f.n, flag: csFlag(f.g, f.t, year), geometry: f.geometry, named: true, gw: f.g, owner: f.o, status: f.t };
+        byGw.set(f.g, e); list.push(e);
       });
+      for (const e of list) if (e.status !== 'i' && STATUS_RU[e.status]) {
+        const o = byGw.get(e.owner);
+        e.sub = STATUS_RU[e.status] + (o && o !== e ? ` · ${o.name}` : '');
+      }
     } else {
       const res = await fetch(`data/eras/${id}.json`);
       if (!res.ok) throw new Error('era ' + id);
-      const data = await res.json();
       const used = new Set();
-      data.features.forEach((f, i) => {
+      (await res.json()).features.forEach((f, i) => {
         const eng = f.properties.NAME;
         let key = null, name = '';
-        if (eng) {
-          key = used.has(eng) ? `${eng}#${i}` : eng; used.add(key);
-          name = histRu[eng] || ruByEng[eng] || eng;
-        }
-        list.push({ key, name, geometry: f.geometry, named: !!eng });
+        if (eng) { key = used.has(eng) ? `${eng}#${i}` : eng; used.add(key); name = histRu[eng] || ruByEng[eng] || eng; }
+        list.push({ key, name, flag: null, geometry: fixAntimeridian(f.geometry), named: !!eng });
       });
     }
     const byKey = new Map();
-    for (const e of list) { e.geometry = fixAntimeridian(e.geometry); e.mp = toMulti(e.geometry); e.bb = bbox(e.mp); if (e.key != null) byKey.set(e.key, e); }
+    for (const e of list) { e.mp = toMulti(e.geometry); e.bb = bbox(e.mp); if (e.key != null) byKey.set(e.key, e); }
     return (eraData[id] = { list, byKey });
   }
 
   // ---------- state ----------
   /** side: {id,name,color,regions:[{id,name,era,code|null,geometry,edited}]} */
   let state = { sides: [] };
-  const ui = { open: new Set(), search: null, mode: null, rough: 40 };
-  let cur = 'now', styleId = 'dark';
+  const ui = { open: new Set(), mode: null };
+  let cur = 'now';
   const history = [];
 
   const sideById = (id) => state.sides.find((s) => s.id === id);
@@ -200,10 +238,11 @@
     return null;
   };
   const eraRegions = () => state.sides.flatMap((s) => s.regions.filter((r) => r.era === cur).map((r) => ({ side: s, region: r })));
+  const entryOf = (region) => (eraData[region.era] ? eraData[region.era].byKey.get(region.code) : null);
 
   function serialize() {
     return {
-      v: 2,
+      v: 3,
       sides: state.sides.map((s) => ({
         id: s.id, name: s.name, color: s.color,
         regions: s.regions.map((r) => ({
@@ -219,7 +258,8 @@
     catch (e) { toast('Не удалось сохранить в браузере — сделай экспорт'); }
   }
   function savePrefs() {
-    try { localStorage.setItem(PREFS_KEY, JSON.stringify({ style: styleId, era: cur, rough: ui.rough })); } catch (e) { /* без настроек */ }
+    P.era = cur;
+    try { localStorage.setItem(PREFS_KEY, JSON.stringify(P)); } catch (e) { /* без настроек */ }
   }
   function hydrate(raw) {
     const sides = [];
@@ -249,7 +289,7 @@
     if (!snap) { toast('Нечего отменять'); return; }
     state = hydrate(JSON.parse(snap));
     save(); rebuildRegions(); renderSides();
-    if (ui.mode && ui.mode.type === 'paint') renderPaintBanner();
+    if (ui.mode) renderBanner();
     toast('Отменено');
   }
   undoBtn.disabled = true;
@@ -262,28 +302,63 @@
   });
   L.control.zoom({ position: 'bottomright' }).addTo(map);
   map.attributionControl.setPrefix(false);
-  map.attributionControl.addAttribution('Natural Earth · historical-basemaps');
+  map.attributionControl.addAttribution('Natural Earth · CShapes 2.0 (CC BY-NC-SA) · historical-basemaps');
+  map.createPane('backdrop').style.zIndex = 250;
   map.createPane('neutral').style.zIndex = 300;
   map.createPane('regions').style.zIndex = 400;
+  map.createPane('cities').style.zIndex = 450;
   map.createPane('draw').style.zIndex = 500;
+  map.getPane('cities').style.pointerEvents = 'none';
   map.fitBounds([[-50, -150], [78, 170]]);
 
+  const backdropGroup = L.featureGroup().addTo(map);
   const neutralGroup = L.featureGroup().addTo(map);
   const regionsGroup = L.featureGroup().addTo(map);
   const labelsGroup = L.layerGroup().addTo(map);
   const layerByRid = new Map();
-  const canvas = L.canvas({ pane: 'neutral' });
-  const S = () => MAP_STYLES[styleId];
+  const neutralCanvas = L.canvas({ pane: 'neutral' });
+  const backdropCanvas = L.canvas({ pane: 'backdrop' });
+  const svgR = L.svg({ pane: 'regions' }).addTo(map);
+  const S = () => MAP_STYLES[P.style];
+
+  // флаги как заливка: SVG-паттерны
+  const NS = 'http://www.w3.org/2000/svg';
+  const defs = document.createElementNS(NS, 'defs');
+  svgR._container.prepend(defs);
+  const patterns = new Set();
+  function flagFill(id) {
+    if (!patterns.has(id)) {
+      const p = document.createElementNS(NS, 'pattern');
+      p.id = 'fl-' + id;
+      for (const [k, v] of Object.entries({ patternUnits: 'objectBoundingBox', patternContentUnits: 'objectBoundingBox', width: '1', height: '1' })) p.setAttribute(k, v);
+      const im = document.createElementNS(NS, 'image');
+      for (const [k, v] of Object.entries({ href: `flags/${id}.svg`, width: '1', height: '1', preserveAspectRatio: 'none' })) im.setAttribute(k, v);
+      p.append(im); defs.append(p); patterns.add(id);
+    }
+    return `url(#fl-${id})`;
+  }
+
+  function neutralTip(e) {
+    return h('div', {}, e.name, e.sub ? h('small', {}, e.sub) : null);
+  }
 
   function rebuildNeutral() {
-    neutralGroup.clearLayers();
-    for (const e of eraData[cur].list) {
+    neutralGroup.clearLayers(); backdropGroup.clearLayers();
+    const data = eraData[cur];
+    if (ERAS[eraIndex(cur)].kind === 'cs' && S().backdrop && eraData.now) {
+      for (const e of eraData.now.list) {
+        backdropGroup.addLayer(L.geoJSON({ type: 'Feature', geometry: e.geometry, properties: {} }, {
+          pane: 'backdrop', renderer: backdropCanvas, interactive: false, style: () => ({ stroke: false, fillColor: S().backdrop, fillOpacity: 1 }),
+        }));
+      }
+    }
+    for (const e of data.list) {
       const l = L.geoJSON({ type: 'Feature', geometry: e.geometry, properties: {} }, {
-        pane: 'neutral', renderer: canvas, style: () => S().neutral, interactive: e.named,
+        pane: 'neutral', renderer: neutralCanvas, style: () => S().neutral, interactive: e.named,
       });
       if (e.named) {
-        l.bindTooltip(e.name, { sticky: true, className: 'hover-tip', direction: 'top', offset: [0, -6] });
-        l.on('mouseover', () => { if (!ui.mode || ui.mode.type === 'pick') l.setStyle(S().hover); });
+        l.bindTooltip(neutralTip(e), { sticky: true, className: 'hover-tip', direction: 'top', offset: [0, -6] });
+        l.on('mouseover', () => { if (!ui.mode) l.setStyle(S().hover); });
         l.on('mouseout', () => l.setStyle(S().neutral));
         l.on('click', (ev) => onNeutralClick(e, ev));
       }
@@ -291,9 +366,15 @@
     }
   }
 
-  function regionStyle(side, hover) {
+  function regionStyle(side, region, hover) {
     const r = S().region;
-    return { color: '#ffffff', opacity: hover ? 1 : r.line, weight: hover ? 1.8 : 1.1, fillColor: side.color, fillOpacity: Math.min(1, hover ? r.fill + 0.14 : r.fill), lineJoin: 'round' };
+    const en = P.fill === 'flag' ? entryOf(region) : null;
+    const flag = en && en.flag;
+    const fill = flag ? 0.94 : r.fill;
+    return {
+      color: '#ffffff', opacity: hover ? 1 : r.line, weight: hover ? 1.8 : 1.1, lineJoin: 'round',
+      fillColor: flag ? flagFill(flag) : side.color, fillOpacity: Math.min(1, hover ? fill + 0.1 : fill),
+    };
   }
 
   function rebuildRegions() {
@@ -305,9 +386,9 @@
         if (!e) continue;
         region.geometry = e.geometry;
       }
-      const layer = L.geoJSON({ type: 'Feature', geometry: region.geometry, properties: {} }, { pane: 'regions', style: () => regionStyle(side) }).getLayers()[0];
-      layer.on('mouseover', () => { if (!ui.mode) layer.setStyle(regionStyle(side, true)); });
-      layer.on('mouseout', () => layer.setStyle(regionStyle(side)));
+      const layer = L.geoJSON({ type: 'Feature', geometry: region.geometry, properties: {} }, { pane: 'regions', renderer: svgR, style: () => regionStyle(side, region) }).getLayers()[0];
+      layer.on('mouseover', () => { if (!ui.mode) layer.setStyle(regionStyle(side, region, true)); });
+      layer.on('mouseout', () => layer.setStyle(regionStyle(side, region)));
       layer.on('click', (e) => onRegionClick(region.id, e));
       regionsGroup.addLayer(layer);
       layerByRid.set(region.id, layer);
@@ -319,35 +400,114 @@
   const updateLabelVisibility = () => map.getContainer().classList.toggle('labels-hidden', map.getZoom() < 3);
   map.on('zoomend', updateLabelVisibility);
 
+  // ---------- города ----------
+  const ZOOM_POP = { 2: 6e6, 3: 2.5e6, 4: 9e5, 5: 3e5, 6: 1.1e5, 7: 4e4, 8: 1.2e4 };
+  const CityLayer = L.Layer.extend({
+    onAdd(m) {
+      this._c = L.DomUtil.create('canvas', 'city-canvas');
+      m.getPane('cities').appendChild(this._c);
+      m.on('moveend zoomend resize viewreset', this.redraw, this);
+      this.redraw();
+    },
+    onRemove(m) { L.DomUtil.remove(this._c); m.off('moveend zoomend resize viewreset', this.redraw, this); },
+    redraw() {
+      const m = this._map, c = this._c;
+      if (!m || !c) return;
+      const sz = m.getSize(), dpr = window.devicePixelRatio || 1;
+      c.width = sz.x * dpr; c.height = sz.y * dpr; c.style.width = sz.x + 'px'; c.style.height = sz.y + 'px';
+      L.DomUtil.setPosition(c, m.containerPointToLayerPoint([0, 0]));
+      const ctx = c.getContext('2d');
+      ctx.scale(dpr, dpr);
+      const o = P.cities;
+      if (!o.show || !cities.length) return;
+      const z = m.getZoom(), zi = Math.max(2, Math.min(9, Math.floor(z)));
+      const factor = Math.pow(2, (50 - o.density) / 22);
+      const thr = (ZOOM_POP[zi] || 0) * factor;
+      const k = o.size / 100;
+      ctx.font = `${Math.round(11 * k * 10) / 10}px ${getComputedStyle(document.body).fontFamily}`;
+      ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
+      const used = [];
+      const bounds = m.getBounds().pad(0.05);
+      for (const [lon, lat, pop, flag, name] of cities) {
+        if (o.caps ? !(flag === 1 && (z >= 3 || pop >= 3e6 * factor)) : !(pop >= thr || (flag === 1 && pop >= thr * 0.15))) continue;
+        if (!bounds.contains([lat, lon])) continue;
+        const p = m.latLngToContainerPoint([lat, lon]);
+        const r = (flag === 1 ? 3.4 : 2.4) * k;
+        ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, 6.2832);
+        ctx.fillStyle = '#fff'; ctx.fill();
+        ctx.lineWidth = flag === 1 ? 2 : 1.2; ctx.strokeStyle = flag === 1 ? '#d97757' : 'rgba(0,0,0,.65)'; ctx.stroke();
+        if (!o.labels) continue;
+        const w = ctx.measureText(name).width, x = p.x + r + 4, y = p.y;
+        const box = [x - 2, y - 7 * k, x + w + 2, y + 7 * k];
+        if (used.some((u) => box[0] < u[2] && box[2] > u[0] && box[1] < u[3] && box[3] > u[1])) continue;
+        used.push(box);
+        ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(8,8,8,.78)'; ctx.strokeText(name, x, y);
+        ctx.fillStyle = flag === 1 ? '#fff' : 'rgba(255,255,255,.92)'; ctx.fillText(name, x, y);
+      }
+    },
+  });
+  const cityLayer = new CityLayer().addTo(map);
+
   // ---------- стиль карты ----------
-  let tileLayer = null, tileErrorShown = false;
+  let tileLayers = [], tileErrorShown = false;
   function setStyle(id, quiet) {
-    styleId = id;
+    P.style = id;
     const st = S();
     document.body.dataset.style = id;
     document.body.dataset.theme = st.theme;
-    if (tileLayer) { map.removeLayer(tileLayer); tileLayer = null; }
-    if (st.tiles) {
-      tileLayer = L.tileLayer(st.tiles.url, { attribution: st.tiles.attr, maxNativeZoom: st.tiles.native, maxZoom: 10, noWrap: true, keepBuffer: 4 }).addTo(map);
-      tileLayer.on('tileerror', () => { if (!tileErrorShown) { tileErrorShown = true; toast('Не удалось загрузить подложку — проверь интернет'); } });
-    }
-    neutralGroup.eachLayer((g) => g.setStyle(st.neutral));
-    if (eraData[cur]) rebuildRegions();
+    tileLayers.forEach((l) => map.removeLayer(l));
+    tileLayers = st.layers.map((cfg) => {
+      const l = L.tileLayer(cfg.url, { attribution: cfg.attr, maxZoom: 10, noWrap: true, keepBuffer: 4, ...cfg.opt }).addTo(map);
+      l.on('tileerror', () => { if (!tileErrorShown) { tileErrorShown = true; toast('Не удалось загрузить подложку — проверь интернет'); } });
+      return l;
+    });
+    if (eraData[cur]) { rebuildNeutral(); rebuildRegions(); }
     document.querySelectorAll('#styleBar button').forEach((b) => b.classList.toggle('on', b.dataset.id === id));
     if (!quiet) savePrefs();
   }
   $('#styleBar').replaceChildren(...Object.entries(MAP_STYLES).map(([id, s]) => h('button', { 'data-id': id, onclick: () => setStyle(id) }, s.label)));
 
+  function setFill(mode, quiet) {
+    P.fill = mode;
+    document.querySelectorAll('#fillBar button').forEach((b) => b.classList.toggle('on', b.dataset.id === mode));
+    if (eraData[cur]) rebuildRegions();
+    if (!quiet) savePrefs();
+  }
+  $('#fillBar').replaceChildren(...[['color', 'Цвет'], ['flag', 'Флаг']].map(([id, l]) => h('button', { 'data-id': id, title: id === 'flag' ? 'Заливка флагом страны (где он известен)' : 'Заливка цветом стороны', onclick: () => setFill(id) }, l)));
+
+  // настройки городов
+  const cityPop = $('#cityPop');
+  function syncCityUi() {
+    const o = P.cities;
+    $('#cShow').checked = o.show; $('#cLabels').checked = o.labels; $('#cCaps').checked = o.caps;
+    $('#cDensity').value = o.density; $('#cSize').value = o.size;
+    $('#citiesBtn').classList.toggle('on', o.show);
+  }
+  for (const [id, key, num] of [['#cShow', 'show'], ['#cLabels', 'labels'], ['#cCaps', 'caps'], ['#cDensity', 'density', 1], ['#cSize', 'size', 1]]) {
+    $(id).addEventListener('input', (e) => { P.cities[key] = num ? +e.target.value : e.target.checked; syncCityUi(); cityLayer.redraw(); savePrefs(); });
+  }
+  $('#citiesBtn').addEventListener('click', (e) => { e.stopPropagation(); cityPop.hidden = !cityPop.hidden; });
+  document.addEventListener('click', (e) => { if (!cityPop.hidden && !cityPop.contains(e.target) && !e.target.closest('#citiesBtn')) cityPop.hidden = true; });
+
+  // режим без интерфейса
+  function setClean(on) {
+    document.body.classList.toggle('clean', on);
+    $('#cleanBack').hidden = !on;
+    if (on) { endMode(); cityPop.hidden = true; map.closePopup(); }
+  }
+  $('#cleanBtn').addEventListener('click', () => setClean(true));
+  $('#cleanBack').addEventListener('click', () => setClean(false));
+
   // ---------- эпохи ----------
-  const eraRange = $('#eraRange'), eraLabelEl = $('#eraLabel'), eraNote = $('#eraNote');
+  const eraRange = $('#eraRange'), eraYear = $('#eraYear'), eraNote = $('#eraNote');
   eraRange.max = ERAS.length - 1;
   let eraToken = 0, eraTimer;
 
   function showEraUi(id) {
     const i = eraIndex(id);
     eraRange.value = i;
-    eraLabelEl.textContent = ERAS[i].label;
-    eraNote.textContent = id === 'now' ? 'современные границы' : 'исторические границы · приблизительно';
+    eraYear.value = ERAS[i].label;
+    eraNote.textContent = ERA_NOTE[ERAS[i].kind];
     $('#eraPrev').disabled = i === 0;
     $('#eraNext').disabled = i === ERAS.length - 1;
   }
@@ -357,7 +517,7 @@
     try {
       if (!eraData[id]) toast('Загружаю границы…');
       await loadEra(id);
-    } catch (err) { toast('Не удалось загрузить эту эпоху'); showEraUi(cur); return; }
+    } catch (err) { console.error(err); toast('Не удалось загрузить эту эпоху'); showEraUi(cur); return; }
     if (token !== eraToken) return;
     endMode();
     map.closePopup();
@@ -368,16 +528,28 @@
     savePrefs();
   }
   eraRange.addEventListener('input', () => {
-    const id = ERAS[+eraRange.value].id;
-    eraLabelEl.textContent = ERAS[+eraRange.value].label;
+    const e = ERAS[+eraRange.value];
+    eraYear.value = e.label; eraNote.textContent = ERA_NOTE[e.kind];
     clearTimeout(eraTimer);
-    eraTimer = setTimeout(() => setEra(id), 140);
+    eraTimer = setTimeout(() => setEra(e.id), 140);
   });
   const stepEra = (d) => { const i = Math.min(ERAS.length - 1, Math.max(0, eraIndex(cur) + d)); if (i !== eraIndex(cur)) setEra(ERAS[i].id); };
   $('#eraPrev').addEventListener('click', () => stepEra(-1));
   $('#eraNext').addEventListener('click', () => stepEra(1));
+  eraYear.addEventListener('focus', () => eraYear.select());
+  eraYear.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { showEraUi(cur); eraYear.blur(); }
+    if (e.key !== 'Enter') return;
+    const m = eraYear.value.match(/\d+/);
+    eraYear.blur();
+    if (!m) { showEraUi(cur); return; }
+    const y = /до|bc|-/i.test(eraYear.value) ? -parseInt(m[0], 10) : parseInt(m[0], 10);
+    const best = ERAS.reduce((a, b) => (Math.abs(b.year - y) < Math.abs(a.year - y) ? b : a));
+    setEra(y >= 2020 ? 'now' : best.id);
+  });
+  eraYear.addEventListener('blur', () => showEraUi(cur));
 
-  // ---------- режимы: pick / paint ----------
+  // ---------- режимы: paint / fill ----------
   const banner = $('#banner'), bannerText = $('#bannerText'), bannerTools = $('#bannerTools');
 
   function showBanner(text, tools) {
@@ -400,29 +572,26 @@
   }
   function setMode(m) { endMode(); ui.mode = m; }
 
-  function startPick(sid) {
-    setMode({ type: 'pick', sid });
-    const side = sideById(sid);
-    map.getContainer().style.cursor = 'crosshair';
-    showBanner(['Кликай по странам — они попадут в ', h('b', {}, side.name)], [h('button', { class: 'btn primary', onclick: endMode }, 'Готово')]);
-  }
-
-  function startPaint(m) {
-    if (m.kind !== 'new' && eraRegions().length < (m.kind === 'give' ? 2 : 1)) {
-      toast('Добавь ещё хотя бы одну страну, чтобы передать ей территорию');
-      return;
-    }
-    setMode({ type: 'paint', ...m });
+  function startMode(m) {
+    const need = m.kind === 'give' ? 2 : 1;
+    if (eraRegions().length < need) { toast('Добавь ещё хотя бы одну страну, чтобы передать ей территорию'); return; }
+    setMode(m);
     map.closePopup();
-    map.dragging.disable();
-    map.getContainer().classList.add('drawing');
-    ui.mode.cleanup = attachFreehand();
-    renderPaintBanner();
+    if (m.kind === 'fill') {
+      map.getContainer().style.cursor = 'crosshair';
+      map.on('click', onFillClick);
+      m.cleanup = () => map.off('click', onFillClick);
+    } else {
+      map.dragging.disable();
+      map.getContainer().classList.add('drawing');
+      m.cleanup = attachFreehand();
+    }
+    renderBanner();
   }
 
-  function renderPaintBanner() {
+  function renderBanner() {
     const m = ui.mode;
-    if (!m || m.type !== 'paint') return;
+    if (!m) return;
     const tools = [];
     let text;
     if (m.kind === 'give') {
@@ -437,18 +606,18 @@
         if (opts.length) sel.append(h('optgroup', { label: s.name }, opts.map((x) => h('option', { value: x.region.id, selected: x.region.id === m.target }, x.region.name))));
       }
       tools.push(sel);
-    } else if (m.kind === 'take') {
+    } else {
       const t = findRegion(m.target);
       if (!t) { endMode(); return; }
-      text = ['Обведи землю, которую займёт «', h('b', {}, t.region.name), '». Она отберётся у соседей.'];
-    } else {
-      const side = sideById(m.sid);
-      if (!side) { endMode(); return; }
-      text = ['Новая территория для «', h('b', {}, side.name), '» — обведи область на карте.'];
+      text = m.kind === 'fill'
+        ? ['Кликай по странам и областям — они целиком отойдут к «', h('b', {}, t.region.name), '».']
+        : ['Обведи любую землю — она отойдёт к «', h('b', {}, t.region.name), '», а у соседей отберётся.'];
     }
-    const rough = h('input', { type: 'range', min: 0, max: 100, value: ui.rough, title: 'Насколько неровной будет граница' });
-    rough.addEventListener('input', () => { ui.rough = +rough.value; savePrefs(); });
-    tools.push(h('label', {}, 'Неровность', rough));
+    if (m.kind !== 'fill') {
+      const rough = h('input', { type: 'range', min: 0, max: 100, value: P.rough, title: 'Насколько неровной будет граница' });
+      rough.addEventListener('input', () => { P.rough = +rough.value; savePrefs(); });
+      tools.push(h('label', {}, 'Неровность', rough));
+    }
     tools.push(h('span', { class: 'grow' }));
     tools.push(h('button', { class: 'btn', onclick: undo }, 'Отменить шаг'));
     tools.push(h('button', { class: 'btn primary', onclick: endMode }, 'Готово'));
@@ -490,70 +659,106 @@
     };
   }
 
+  // Прилипание: точки контура рядом с существующей границей садятся на неё, чтобы не оставалось щелей и «заусенцев».
+  function snapRing(ring) {
+    const tol = 6, z = map.getZoom();
+    const pad = (tol * 360) / (256 * Math.pow(2, z)) * 1.5;
+    const rb = bbox([[ring]]);
+    const box = [rb[0] - pad, rb[1] - pad, rb[2] + pad, rb[3] + pad];
+    const cand = [];
+    const take = (mp) => {
+      for (const poly of mp) for (const r of poly) for (const p of r) if (p[0] >= box[0] && p[0] <= box[2] && p[1] >= box[1] && p[1] <= box[3]) cand.push(p);
+    };
+    for (const e of eraData[cur].list) if (bbHit(e.bb, box)) take(e.mp);
+    for (const { region } of eraRegions()) if (region.edited && region.geometry) take(toMulti(region.geometry));
+    if (!cand.length || cand.length > 120000) return ring;
+    const grid = new Map(), cell = tol;
+    const px = (p) => map.latLngToContainerPoint([p[1], p[0]]);
+    for (const p of cand) {
+      const q = px(p), key = Math.floor(q.x / cell) + ',' + Math.floor(q.y / cell);
+      (grid.get(key) || grid.set(key, []).get(key)).push([p, q]);
+    }
+    return ring.map((p) => {
+      const q = px(p), cx = Math.floor(q.x / cell), cy = Math.floor(q.y / cell);
+      let best = null, bd = tol * tol;
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+        for (const [pp, qq] of grid.get(cx + dx + ',' + (cy + dy)) || []) {
+          const d = (qq.x - q.x) ** 2 + (qq.y - q.y) ** 2;
+          if (d < bd) { bd = d; best = pp; }
+        }
+      }
+      return best || p;
+    });
+  }
+
   function finishStroke(latlngs) {
     if (latlngs.length < 6) { toast('Зажми кнопку и обведи участок, не отпуская'); return; }
     const px = latlngs.map((l) => map.latLngToLayerPoint(l));
-    const simple = L.LineUtil.simplify(px, 3).map((p) => map.layerPointToLatLng(p));
+    const simple = L.LineUtil.simplify(px, 2.5).map((p) => map.layerPointToLatLng(p));
     if (simple.length < 3) { toast('Слишком маленький контур'); return; }
     let ring = simple.map((l) => [l.lng, l.lat]);
-    ring = smooth(roughen(ring, (ui.rough / 100) * 0.5));
+    ring = snapRing(smooth(roughen(ring, (P.rough / 100) * 0.5)));
     ring.push(ring[0]);
     applyStroke(ring);
   }
 
+  // общий коммит: piece отходит target, у victims вычитается
+  function commit(target, piece, victims, doneMsg) {
+    snapshot();
+    const pb = bbox(piece);
+    const removed = [];
+    for (const v of victims) {
+      const geom = toMulti(v.region.geometry);
+      if (!bbHit(bbox(geom), pb)) continue;
+      const left = pc.difference(geom, piece);
+      if (!left.length) removed.push(v);
+      else { v.region.geometry = asGeom(left); v.region.edited = true; }
+    }
+    for (const v of removed) v.side.regions.splice(v.side.regions.indexOf(v.region), 1);
+    target.region.geometry = asGeom(pc.union(toMulti(target.region.geometry), piece));
+    target.region.edited = true;
+    if (doneMsg) toast(doneMsg);
+    save(); rebuildRegions(); renderSides(); renderBanner();
+  }
+
   function applyStroke(ring) {
     const m = ui.mode;
-    if (!m || m.type !== 'paint') return;
+    if (!m || (m.kind !== 'give' && m.kind !== 'take')) return;
     const drawn = [[ring]];
     const db = bbox(drawn);
     try {
-      let piece, victims = [], target = null;
-      if (m.kind === 'new') {
-        piece = pc.union(drawn);
-      } else if (m.kind === 'give') {
-        const src = findRegion(m.source); target = findRegion(m.target);
-        if (!src || !target) return;
-        piece = pc.intersection(toMulti(src.region.geometry), drawn);
-        victims = [src];
+      const target = findRegion(m.target);
+      if (!target) return;
+      if (m.kind === 'give') {
+        const src = findRegion(m.source);
+        if (!src) return;
+        const piece = pc.intersection(toMulti(src.region.geometry), drawn);
+        if (!piece.length) { toast('Обведи участок внутри этой страны'); return; }
+        commit(target, piece, [src], `Передано: ${src.region.name} → ${target.region.name}`);
       } else {
-        target = findRegion(m.target);
-        if (!target) return;
-        const parts = []; // только суша: не раздаём океан
+        const parts = []; // только суша: океан не раздаём
         for (const e of eraData[cur].list) if (bbHit(e.bb, db)) parts.push(pc.intersection(e.mp, drawn));
         const flat = parts.filter((p) => p.length);
-        piece = flat.length ? pc.union(...flat) : [];
-        victims = eraRegions().filter((x) => x.region.id !== m.target);
+        if (!flat.length) { toast('Здесь нечего занять — обведи сушу'); return; }
+        commit(target, pc.union(...flat), eraRegions().filter((x) => x.region.id !== m.target));
       }
-      if (!piece.length) { toast(m.kind === 'give' ? 'Обведи участок внутри этой страны' : 'Здесь нечего занять — обведи сушу'); return; }
-
-      snapshot();
-      const srcName = m.kind === 'give' ? findRegion(m.source).region.name : '';
-      const pb = bbox(piece);
-      const removed = [];
-      for (const v of victims) {
-        const geom = toMulti(v.region.geometry);
-        if (!bbHit(bbox(geom), pb)) continue;
-        const left = pc.difference(geom, piece);
-        if (!left.length) removed.push(v);
-        else { v.region.geometry = asGeom(left); v.region.edited = true; }
-      }
-      for (const v of removed) v.side.regions.splice(v.side.regions.indexOf(v.region), 1);
-
-      if (m.kind === 'new') {
-        const side = sideById(m.sid);
-        const n = side.regions.filter((r) => !r.code && r.era === cur).length + 1;
-        side.regions.push({ id: uid(), name: `Территория ${n}`, era: cur, code: null, geometry: asGeom(piece), edited: true });
-        ui.open.add(side.id);
-      } else {
-        target.region.geometry = asGeom(pc.union(toMulti(target.region.geometry), piece));
-        target.region.edited = true;
-        if (m.kind === 'give') toast(`Передано: ${srcName} → ${target.region.name}`);
-      }
-      save(); rebuildRegions(); renderSides(); renderPaintBanner();
     } catch (err) {
       console.error(err);
       toast('Контур пересёкся сам с собой — попробуй обвести ещё раз');
     }
+  }
+
+  function onFillClick(ev) {
+    const m = ui.mode;
+    if (!m || m.kind !== 'fill') return;
+    const { lng, lat } = ev.latlng;
+    const hit = eraData[cur].list.find((e) => e.named && bbHit(e.bb, [lng, lat, lng, lat]) && inMulti(e.mp, lng, lat));
+    const target = findRegion(m.target);
+    if (!target) return;
+    if (!hit) { toast('Здесь нет суши'); return; }
+    try {
+      commit(target, hit.mp, eraRegions().filter((x) => x.region.id !== m.target), `${hit.name} → ${target.region.name}`);
+    } catch (err) { console.error(err); toast('Не получилось залить эту область'); }
   }
 
   // ---------- операции ----------
@@ -592,7 +797,7 @@
     f.side.regions.splice(f.side.regions.indexOf(f.region), 1);
     map.closePopup();
     save(); rebuildRegions(); renderSides();
-    if (ui.mode && ui.mode.type === 'paint') renderPaintBanner();
+    if (ui.mode) renderBanner();
   }
   function deleteSide(sid) {
     const s = sideById(sid);
@@ -612,11 +817,9 @@
     h('button', { class: 'pop-chip ' + cls, onclick: fn }, side ? h('i', { style: `background:${side.color}` }) : null, label);
 
   function onNeutralClick(e, ev) {
-    const m = ui.mode;
-    if (m && m.type !== 'pick') return;
+    if (ui.mode) return; // рисуем — событие идёт к карте
     L.DomEvent.stopPropagation(ev);
-    if (m) { assignCountry(e.key, m.sid); return; }
-    const box = h('div', {}, h('div', { class: 'pop-title' }, e.name));
+    const box = h('div', {}, h('div', { class: 'pop-title' }, e.name), e.sub ? h('div', { class: 'pop-sub' }, e.sub) : null);
     if (!state.sides.length) {
       box.append(h('div', { class: 'pop-note' }, 'Сначала создай сторону кнопкой «+» слева.'));
     } else {
@@ -628,22 +831,17 @@
   }
 
   function onRegionClick(rid, ev) {
-    const m = ui.mode;
+    if (ui.mode) return;
     const f = findRegion(rid);
     if (!f) return;
-    if (m && m.type === 'pick') {
-      L.DomEvent.stopPropagation(ev);
-      if (f.region.code) assignCountry(f.region.code, m.sid);
-      return;
-    }
-    if (m) return;
     L.DomEvent.stopPropagation(ev);
     const box = h('div', {},
       h('div', { class: 'pop-title' }, f.region.name),
       h('div', { class: 'pop-sub' }, h('i', { style: `background:${f.side.color}` }), f.side.name),
       h('div', { class: 'pop-list' },
-        chip(null, 'Передать часть другой стране…', () => startPaint({ kind: 'give', source: rid })),
-        chip(null, 'Расширить границы рисованием', () => startPaint({ kind: 'take', target: rid })),
+        chip(null, 'Передать часть другой стране…', () => startMode({ kind: 'give', source: rid })),
+        chip(null, 'Нарисовать территорию', () => startMode({ kind: 'take', target: rid })),
+        chip(null, 'Залить страну целиком', () => startMode({ kind: 'fill', target: rid })),
         ...state.sides.filter((s) => s !== f.side).map((s) => chip(s, `Передать сторону: ${s.name}`, () => { map.closePopup(); moveRegion(rid, s.id); })),
         chip(null, 'Убрать со стороны', () => removeRegion(rid), 'danger')));
     L.popup({ offset: [0, -2] }).setLatLng(ev.latlng).setContent(box).openOn(map);
@@ -652,7 +850,7 @@
   // ---------- sidebar ----------
   const sidesEl = $('#sides'), emptyEl = $('#empty');
 
-  function editableName(el, current, commit) {
+  function editableName(el, current, commitName) {
     el.contentEditable = 'true';
     el.focus();
     const range = document.createRange(); range.selectNodeContents(el);
@@ -661,7 +859,7 @@
       el.removeEventListener('blur', onBlur); el.removeEventListener('keydown', onKey);
       el.contentEditable = 'false';
       const v = el.textContent.trim().slice(0, 40);
-      if (ok && v && v !== current) commit(v); else el.textContent = current;
+      if (ok && v && v !== current) commitName(v); else el.textContent = current;
     };
     const onBlur = () => done(true);
     const onKey = (e) => {
@@ -671,60 +869,57 @@
     el.addEventListener('blur', onBlur); el.addEventListener('keydown', onKey);
   }
 
+  let focusSearch = null;
   function renderSides() {
     emptyEl.hidden = state.sides.length > 0;
     sidesEl.replaceChildren(...state.sides.map(sideCard));
-    const inp = sidesEl.querySelector('.search input');
-    if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
+    if (focusSearch) {
+      const inp = sidesEl.querySelector(`[data-search="${focusSearch.sid}"]`);
+      if (inp) { inp.focus(); }
+      focusSearch = null;
+    }
   }
 
   function sideCard(side) {
     const open = ui.open.has(side.id);
     const here = side.regions.filter((r) => r.era === cur);
     const nameEl = h('div', { class: 'side-name', title: 'Двойной клик — переименовать' }, side.name);
-    const rename = () => editableName(nameEl, side.name, (v) => { snapshot(); side.name = v; save(); rebuildRegions(); renderSides(); });
-    nameEl.addEventListener('dblclick', (e) => { e.stopPropagation(); rename(); });
+    nameEl.addEventListener('dblclick', (e) => { e.stopPropagation(); editableName(nameEl, side.name, (v) => { snapshot(); side.name = v; save(); rebuildRegions(); renderSides(); }); });
 
     const colorInput = h('input', { type: 'color', value: side.color, title: 'Цвет стороны' });
     colorInput.addEventListener('change', () => { snapshot(); side.color = colorInput.value; save(); rebuildRegions(); renderSides(); });
     const dot = h('span', { class: 'dot', style: `background:${side.color}`, onclick: (e) => e.stopPropagation() }, colorInput);
 
     const top = h('div', { class: 'side-top', onclick: () => { ui.open.has(side.id) ? ui.open.delete(side.id) : ui.open.add(side.id); renderSides(); } },
-      dot, nameEl, h('span', { class: 'count' }, String(here.length)), h('span', { class: 'chev' }, icon('chev')));
+      dot, nameEl, h('span', { class: 'count' }, String(here.length)),
+      h('button', { class: 'icon-btn danger', title: 'Удалить сторону', onclick: (e) => { e.stopPropagation(); deleteSide(side.id); } }, icon('trash')),
+      h('span', { class: 'chev' }, icon('chev')));
 
-    const searching = ui.search === side.id;
-    const actions = h('div', { class: 'side-actions' },
-      h('button', { class: 'chip-btn accent', onclick: () => { ui.search = searching ? null : side.id; renderSides(); } }, icon('plus', 14), 'Страна'),
-      h('button', { class: 'chip-btn', title: 'Добавлять страны кликом по карте', onclick: () => startPick(side.id) }, icon('cursor', 14), 'По карте'),
-      h('button', { class: 'chip-btn', title: 'Нарисовать новую территорию', onclick: () => startPaint({ kind: 'new', sid: side.id }) }, icon('pen', 14), 'Рисовать'),
-      h('button', { class: 'chip-btn', onclick: rename }, 'Имя'),
-      h('button', { class: 'chip-btn danger', title: 'Удалить сторону', onclick: () => deleteSide(side.id) }, icon('trash', 14)));
-
-    const body = h('div', { class: 'side-body' }, actions);
-    if (searching) body.append(searchBox(side));
-
+    const body = h('div', { class: 'side-body' }, searchBox(side));
     const elsewhere = side.regions.length - here.length;
     body.append(here.length
       ? h('ul', { class: 'regions' }, here.map((r) => regionRow(r)))
-      : h('div', { class: 'none' }, elsewhere ? `В этом году пусто · в других эпохах: ${elsewhere}` : 'Пока пусто — добавь страны.'));
+      : h('div', { class: 'none' }, elsewhere ? `В этом году пусто · в других эпохах: ${elsewhere}` : 'Пока пусто'));
 
     return h('div', { class: 'side' + (open ? ' open' : '') }, top, body);
   }
 
   function regionRow(r) {
-    const nameEl = h('span', { class: 'rn', title: 'Показать на карте' }, r.name);
+    const nameEl = h('span', { class: 'rn', title: 'Показать на карте · двойной клик — переименовать' }, r.name);
     nameEl.addEventListener('click', () => flyToRegion(r.id));
     nameEl.addEventListener('dblclick', () => editableName(nameEl, r.name, (v) => { snapshot(); r.name = v; save(); rebuildRegions(); renderSides(); }));
     return h('li', { class: 'region' },
       nameEl,
-      r.code ? (r.edited ? h('span', { class: 'tag' }, 'изменена') : null) : h('span', { class: 'tag' }, 'своя'),
-      h('button', { class: 'icon-btn', title: 'Передать часть другой стране', onclick: () => startPaint({ kind: 'give', source: r.id }) }, icon('give', 15)),
-      h('button', { class: 'icon-btn', title: 'Расширить границы рисованием', onclick: () => startPaint({ kind: 'take', target: r.id }) }, icon('brush', 15)),
-      h('button', { class: 'icon-btn danger', title: 'Убрать', onclick: () => removeRegion(r.id) }, icon('trash', 15)));
+      r.code ? (r.edited ? h('span', { class: 'tag' }, 'изм.') : null) : h('span', { class: 'tag' }, 'своя'),
+      h('span', { class: 'acts' },
+        h('button', { class: 'icon-btn', title: 'Передать часть другой стране', onclick: () => startMode({ kind: 'give', source: r.id }) }, icon('give')),
+        h('button', { class: 'icon-btn', title: 'Нарисовать территорию', onclick: () => startMode({ kind: 'take', target: r.id }) }, icon('brush')),
+        h('button', { class: 'icon-btn', title: 'Залить страну целиком', onclick: () => startMode({ kind: 'fill', target: r.id }) }, icon('bucket')),
+        h('button', { class: 'icon-btn danger', title: 'Убрать', onclick: () => removeRegion(r.id) }, icon('trash'))));
   }
 
   function searchBox(side) {
-    const input = h('input', { type: 'text', placeholder: 'Найти страну…', autocomplete: 'off' });
+    const input = h('input', { type: 'text', placeholder: '＋ Добавить страну…', autocomplete: 'off', 'data-search': side.id });
     const results = h('div', { class: 'results' });
     let idx = 0, list = [];
     const refresh = () => {
@@ -740,13 +935,13 @@
           e.name, ex ? h('small', {}, h('i', { style: `background:${ex.side.color}` }), same ? 'уже здесь' : ex.side.name) : null);
       }) : [h('div', { class: 'no-res' }, 'Ничего не найдено')]));
     };
-    const pickResult = (e) => assignCountry(e.key, side.id, { fly: true });
+    const pickResult = (e) => { focusSearch = { sid: side.id }; assignCountry(e.key, side.id, { fly: true }); };
     input.addEventListener('input', () => { idx = 0; refresh(); });
     input.addEventListener('keydown', (e) => {
       if (e.key === 'ArrowDown') { idx = Math.min(idx + 1, list.length - 1); refresh(); e.preventDefault(); }
       else if (e.key === 'ArrowUp') { idx = Math.max(idx - 1, 0); refresh(); e.preventDefault(); }
       else if (e.key === 'Enter' && list[idx]) { e.preventDefault(); pickResult(list[idx]); }
-      else if (e.key === 'Escape') { e.stopPropagation(); ui.search = null; renderSides(); }
+      else if (e.key === 'Escape') { input.value = ''; refresh(); input.blur(); }
     });
     refresh();
     return h('div', { class: 'search' }, input, results);
@@ -778,8 +973,9 @@
     snapshot();
     const side = { id: uid(), name, color: chosenColor, regions: [] };
     state.sides.push(side);
-    ui.open.add(side.id); ui.search = side.id;
+    ui.open.add(side.id);
     sideForm.hidden = true;
+    focusSearch = { sid: side.id };
     save(); renderSides();
   });
 
@@ -799,7 +995,7 @@
       if (!Array.isArray(raw.sides)) throw new Error('bad');
       if (state.sides.length && !confirm('Заменить текущую карту импортированной?')) return;
       endMode(); snapshot();
-      state = hydrate(raw); ui.open.clear(); ui.search = null;
+      state = hydrate(raw); ui.open.clear();
       save(); rebuildRegions(); renderSides();
       toast('Карта загружена');
     } catch (err) { toast('Не получилось прочитать файл'); }
@@ -807,31 +1003,43 @@
   $('#resetBtn').addEventListener('click', () => {
     if (!confirm('Стереть все стороны и границы?')) return;
     endMode(); snapshot();
-    state = { sides: [] }; ui.open.clear(); ui.search = null;
+    state = { sides: [] }; ui.open.clear();
     save(); rebuildRegions(); renderSides();
   });
 
   // ---------- прочее ----------
+  const typing = () => /INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName) || document.activeElement.isContentEditable;
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && ui.mode) endMode();
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !/INPUT|SELECT/.test(document.activeElement.tagName) && !document.activeElement.isContentEditable) { e.preventDefault(); undo(); }
+    if (e.key === 'Escape') {
+      if (document.body.classList.contains('clean')) setClean(false);
+      else if (ui.mode) endMode();
+      cityPop.hidden = true;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !typing()) { e.preventDefault(); undo(); }
+    if ((e.key === 'h' || e.key === 'H' || e.key === 'р' || e.key === 'Р') && !typing() && !e.ctrlKey && !e.metaKey) setClean(!document.body.classList.contains('clean'));
   });
   $('#panelToggle').addEventListener('click', () => document.body.classList.add('panel-open'));
   map.on('click', () => { if (window.innerWidth <= 760 && !ui.mode) document.body.classList.remove('panel-open'); });
 
   // ---------- запуск ----------
   async function boot() {
-    let prefs = {};
-    try { prefs = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}'); } catch (e) { /* по умолчанию */ }
-    if (prefs.rough >= 0 && prefs.rough <= 100) ui.rough = prefs.rough;
-    setStyle(MAP_STYLES[prefs.style] ? prefs.style : 'dark', true);
     try {
-      const [topo, names, hist] = await Promise.all([
-        fetch('data/countries.json').then((r) => r.json()),
-        fetch('data/names-ru.json').then((r) => r.json()),
+      const saved = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}');
+      P = { ...DEFAULT_PREFS, ...saved, cities: { ...DEFAULT_PREFS.cities, ...(saved.cities || {}) } };
+    } catch (e) { /* по умолчанию */ }
+    if (!MAP_STYLES[P.style]) P.style = 'dark';
+    syncCityUi();
+    setStyle(P.style, true);
+    setFill(P.fill === 'flag' ? 'flag' : 'color', true);
+    try {
+      const [topo, hist, a2, flags, cts] = await Promise.all([
+        fetch('data/countries10.json').then((r) => r.json()),
         fetch('data/names-hist-ru.json').then((r) => r.json()),
+        fetch('data/gw-a2.json').then((r) => r.json()),
+        fetch('data/flags.json').then((r) => r.json()),
+        fetch('data/cities.json').then((r) => r.json()),
       ]);
-      modernTopo = topo; ruNames = names; histRu = hist;
+      modernTopo = topo; histRu = hist; gwA2 = a2; flagSet = new Set(flags); cities = cts;
       await loadEra('now');
     } catch (err) {
       toast('Не удалось загрузить данные карты. Открой сайт через веб-сервер.');
@@ -840,13 +1048,14 @@
     }
     load();
     state.sides.forEach((s) => ui.open.add(s.id));
-    const startEra = ERAS.some((e) => e.id === prefs.era) ? prefs.era : 'now';
+    const startEra = ERAS.some((e) => e.id === P.era) ? P.era : 'now';
     await loadEra(startEra).catch(() => null);
     cur = eraData[startEra] ? startEra : 'now';
     showEraUi(cur);
     rebuildNeutral();
     rebuildRegions();
     renderSides();
+    cityLayer.redraw();
   }
   boot();
 })();
