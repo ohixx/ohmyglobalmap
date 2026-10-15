@@ -4,7 +4,7 @@
 (() => {
   'use strict';
 
-  const V = '20261015c'; // версия сборки: меняется при каждом обновлении, чтобы браузер не держал старые данные
+  const V = '20261015d'; // версия сборки: меняется при каждом обновлении, чтобы браузер не держал старые данные
   const STORE_KEY = 'omgm.v1';
   const PREFS_KEY = 'omgm.prefs';
   const PALETTE = ['#d97757', '#6a9bcc', '#788c5d', '#b07aa1', '#c9a227', '#4e9a9a', '#c25b5b', '#8b7ec8', '#9a8c6c', '#5b8a72'];
@@ -352,22 +352,43 @@
   const svgR = L.svg({ pane: 'regions', padding: 0.4 }).addTo(map);
   const S = () => MAP_STYLES[P.style];
 
-  // флаги как заливка: SVG-паттерны
+  // флаги как заливка: у каждого региона свой SVG-паттерн, привязанный к географической рамке главной части страны.
+  // Раньше рамка считалась по видимой части контура и флаг «плыл» при зуме и перемещении.
   const NS = 'http://www.w3.org/2000/svg';
   const defs = document.createElementNS(NS, 'defs');
   svgR._container.prepend(defs);
-  const patterns = new Set();
-  function flagFill(id) {
-    if (!patterns.has(id)) {
-      const p = document.createElementNS(NS, 'pattern');
-      p.id = 'fl-' + id;
-      for (const [k, v] of Object.entries({ patternUnits: 'objectBoundingBox', patternContentUnits: 'objectBoundingBox', width: '1', height: '1' })) p.setAttribute(k, v);
-      const im = document.createElementNS(NS, 'image');
-      for (const [k, v] of Object.entries({ href: `flags/${id}.svg`, width: '1', height: '1', preserveAspectRatio: 'none' })) im.setAttribute(k, v);
-      p.append(im); defs.append(p); patterns.add(id);
+  const patterns = new Map();
+  function mainBox(geom) {
+    let best = null, bestA = -1;
+    for (const p of toMulti(geom)) {
+      const b = bbox([p]), a = (b[2] - b[0]) * (b[3] - b[1]);
+      if (a > bestA) { bestA = a; best = b; }
     }
-    return `url(#fl-${id})`;
+    return best;
   }
+  function positionPattern(pt) {
+    const nw = map.latLngToLayerPoint([pt.bb[3], pt.bb[0]]), se = map.latLngToLayerPoint([pt.bb[1], pt.bb[2]]);
+    const w = Math.max(1, se.x - nw.x), h = Math.max(1, se.y - nw.y);
+    for (const [k, v] of Object.entries({ x: nw.x, y: nw.y, width: w, height: h })) pt.el.setAttribute(k, v);
+    pt.im.setAttribute('width', w); pt.im.setAttribute('height', h);
+  }
+  function flagFill(region, flag) {
+    let pt = patterns.get(region.id);
+    if (!pt) {
+      const el = document.createElementNS(NS, 'pattern'), im = document.createElementNS(NS, 'image');
+      el.id = 'fl-' + region.id;
+      el.setAttribute('patternUnits', 'userSpaceOnUse');
+      im.setAttribute('preserveAspectRatio', 'none');
+      el.append(im); defs.append(el);
+      pt = { el, im, flag: null, geom: null };
+      patterns.set(region.id, pt);
+    }
+    if (pt.flag !== flag) { pt.flag = flag; pt.im.setAttribute('href', `flags/${flag}.svg`); }
+    if (pt.geom !== region.geometry) { pt.geom = region.geometry; pt.bb = mainBox(region.geometry); }
+    positionPattern(pt);
+    return `url(#fl-${region.id})`;
+  }
+  map.on('viewreset zoomend moveend', () => patterns.forEach(positionPattern));
 
   // LOD: на мировом масштабе рисуем упрощённые границы — в 10 раз меньше точек, карта не тормозит
   let lodOn = true;
@@ -382,17 +403,44 @@
   // Слои стран создаются лениво и держатся на карте только пока попадают в видимую область —
   // иначе Leaflet заново проецирует сотни тысяч точек при каждом зуме.
   function makeNeutral(e) {
-    const l = poly(geomOf(e), { pane: 'neutral', renderer: neutralCanvas, interactive: e.named, smoothFactor: 1.2, ...S().neutral });
-    if (e.named) {
-      l.on('mouseover', (ev) => {
-        if (!l.getTooltip()) { l.bindTooltip(neutralTip(e), { sticky: true, className: 'hover-tip', direction: 'top', offset: [0, -6] }); l.openTooltip(ev.latlng); }
-        if (!ui.mode) l.setStyle(S().hover);
-      });
-      l.on('mouseout', () => l.setStyle(S().neutral));
-      l.on('click', (ev) => onNeutralClick(e, ev));
-    }
-    return l;
+    return poly(geomOf(e), { pane: 'neutral', renderer: neutralCanvas, interactive: false, smoothFactor: 1.2, ...S().neutral });
   }
+  // наведение и клик по нейтральным странам: bbox-фильтр + point-in-polygon только для пары кандидатов
+  const hoverTip = L.tooltip({ className: 'hover-tip', direction: 'top', offset: [0, -8], opacity: 1 });
+  let hoverEnt = null, hoverRaf = 0, lastMove = null;
+  function entryAt(ll) {
+    const { lng, lat } = ll;
+    for (const e of eraData[cur].list) {
+      if (!e.named || lng < e.bb[0] || lng > e.bb[2] || lat < e.bb[1] || lat > e.bb[3]) continue;
+      if (inMulti(e.mp, lng, lat)) return e;
+    }
+    return null;
+  }
+  function setHover(e, ll) {
+    if (e !== hoverEnt) {
+      if (hoverEnt && hoverEnt._nl) hoverEnt._nl.setStyle(S().neutral);
+      hoverEnt = e;
+      if (e && e._nl) e._nl.setStyle(S().hover);
+      if (e) hoverTip.setContent(neutralTip(e)); else map.closeTooltip(hoverTip);
+    }
+    if (e) { hoverTip.setLatLng(ll); if (!map.hasLayer(hoverTip)) map.openTooltip(hoverTip, ll); }
+  }
+  map.on('mousemove', (ev) => {
+    lastMove = ev;
+    if (hoverRaf) return;
+    hoverRaf = requestAnimationFrame(() => {
+      hoverRaf = 0;
+      const t = lastMove.originalEvent && lastMove.originalEvent.target;
+      const overRegion = t && t.classList && t.classList.contains('leaflet-interactive');
+      setHover(ui.mode || overRegion || map.dragging.moving() ? null : entryAt(lastMove.latlng), lastMove.latlng);
+    });
+  });
+  map.on('mouseout', () => setHover(null));
+  map.on('click', (ev) => {
+    if (ui.mode) return;
+    const e = entryAt(ev.latlng);
+    if (e) onNeutralClick(e, ev);
+  });
   const makeBackdrop = (e) => poly(geomOf(e), { pane: 'backdrop', renderer: backdropCanvas, interactive: false, stroke: false, fillColor: S().backdrop, fillOpacity: 1 });
 
   function syncGroup(group, list, prop, make, vb) {
@@ -437,7 +485,7 @@
     const fill = flag ? r.flag : r.fill;
     return {
       color: '#ffffff', opacity: hover ? 1 : r.line, weight: hover ? 1.8 : 1.1, lineJoin: 'round',
-      fillColor: flag ? flagFill(flag) : side.color, fillOpacity: Math.min(1, hover ? fill + 0.1 : fill),
+      fillColor: flag ? flagFill(region, flag) : side.color, fillOpacity: Math.min(1, hover ? fill + 0.1 : fill),
     };
   }
 
@@ -448,6 +496,8 @@
     if (!c) return;
     regionsGroup.removeLayer(c.layer); labelsGroup.removeLayer(c.label);
     regCache.delete(id); layerByRid.delete(id);
+    const pt = patterns.get(id);
+    if (pt) { pt.el.remove(); patterns.delete(id); }
   }
   function rebuildRegions() {
     const data = eraData[cur], alive = new Set();
@@ -560,7 +610,7 @@
     document.body.dataset.theme = st.theme;
     tileLayers.forEach((l) => map.removeLayer(l));
     tileLayers = st.layers.map((cfg) => {
-      const l = L.tileLayer(cfg.url, { attribution: cfg.attr, maxZoom: 10, noWrap: true, keepBuffer: 4, ...cfg.opt }).addTo(map);
+      const l = L.tileLayer(cfg.url, { attribution: cfg.attr, maxZoom: 10, noWrap: true, keepBuffer: 2, ...cfg.opt }).addTo(map);
       l.on('tileerror', () => { if (!tileErrorShown) { tileErrorShown = true; toast('Не удалось загрузить подложку — проверь интернет'); } });
       return l;
     });
