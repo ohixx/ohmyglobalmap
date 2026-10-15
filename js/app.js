@@ -21,18 +21,18 @@
   const MAP_STYLES = {
     dark: { label: 'Тёмная', theme: 'dark', layers: [], backdrop: '#242321',
       neutral: { color: '#46453f', weight: 0.7, opacity: 1, fillColor: '#2d2c29', fillOpacity: 1 },
-      hover: { fillColor: '#3b3a36', color: '#5a5952', weight: 1 }, region: { fill: 0.74, line: 0.55 } },
+      hover: { fillColor: '#3b3a36', color: '#5a5952', weight: 1 }, region: { fill: 0.74, flag: 0.8, line: 0.55 } },
     relief: { label: 'Рельеф', theme: 'dark',
       layers: [
         { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', opt: { maxNativeZoom: 16 }, attr: 'Основа: Esri' },
         { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}', opt: { maxNativeZoom: 15, className: 'hillshade', opacity: 0.8 }, attr: 'Рельеф: Esri' },
       ],
       neutral: { color: '#d8d4c6', weight: 0.7, opacity: 0.42, fillColor: '#fff', fillOpacity: 0.001 },
-      hover: { fillColor: '#fff', fillOpacity: 0.1, weight: 1, opacity: 0.75 }, region: { fill: 0.58, line: 0.8 } },
+      hover: { fillColor: '#fff', fillOpacity: 0.1, weight: 1, opacity: 0.75 }, region: { fill: 0.58, flag: 0.62, line: 0.8 } },
     sat: { label: 'Спутник', theme: 'dark',
       layers: [{ url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', opt: { maxNativeZoom: 17 }, attr: 'Снимки: Esri, Maxar, Earthstar Geographics' }],
       neutral: { color: '#ffffff', weight: 0.8, opacity: 0.5, fillColor: '#fff', fillOpacity: 0.001 },
-      hover: { fillColor: '#fff', fillOpacity: 0.2, weight: 1.2, opacity: 0.8 }, region: { fill: 0.55, line: 0.85 } },
+      hover: { fillColor: '#fff', fillOpacity: 0.2, weight: 1.2, opacity: 0.8 }, region: { fill: 0.55, flag: 0.6, line: 0.85 } },
   };
 
   const DEFAULT_PREFS = { style: 'dark', era: 'now', rough: 40, tool: 'line', fill: 'color', fold: { panel: false, timeline: false }, cities: { show: true, labels: true, caps: false, density: 40, size: 100 } };
@@ -433,7 +433,7 @@
     const r = S().region;
     const en = P.fill === 'flag' ? entryOf(region) : null;
     const flag = en && en.flag;
-    const fill = flag ? 0.94 : r.fill;
+    const fill = flag ? r.flag : r.fill;
     return {
       color: '#ffffff', opacity: hover ? 1 : r.line, weight: hover ? 1.8 : 1.1, lineJoin: 'round',
       fillColor: flag ? flagFill(flag) : side.color, fillOpacity: Math.min(1, hover ? fill + 0.1 : fill),
